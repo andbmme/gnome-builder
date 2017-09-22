@@ -20,8 +20,7 @@ using GLib;
 using Ide;
 using Peas;
 
-[ModuleInit]
-public void peas_register_types (GLib.TypeModule module)
+public void ide_vala_pack_register_types (GLib.TypeModule module)
 {
 	Peas.ObjectModule peas = (Peas.ObjectModule)module;
 

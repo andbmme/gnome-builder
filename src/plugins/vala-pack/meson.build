@@ -1,5 +1,11 @@
 if get_option('with_vala_pack')
 
+vala_pack_resources = gnome.compile_resources(
+  'vala-pack-resources',
+  'vala-pack.gresource.xml',
+  c_name: 'ide_vala_pack',
+)
+
 if not get_option('with_vapi')
 #  error('You must enable VAPI generation to build the Vala pack')
 endif
@@ -52,40 +58,28 @@ vala_pack_sources = [
 vala_pack_deps = [
   libvala,
   libide_vapi,
+  libpeas_dep,
+  libide_plugin_dep,
 ]
 
-shared_module('vala-pack-plugin', vala_pack_sources,
-  dependencies: plugin_deps + vala_pack_deps,
-  vala_args: [
-    '--target-glib=2.52',
-    '--pkg=posix',
-    '--pkg=libpeas-1.0',
-    '--pkg=gtksourceview-3.0',
-    '--pkg=gio-2.0',
-    '--pkg=libvala-' + libvala_version,
-    '--pkg=libdazzle-1.0',
-  ],
-  c_args: [
-    '-DVALA_VERSION="@0@"'.format(libvala_version),
-    '-DLOG_DOMAIN="vala-pack-plugin"',
-    '-DGETTEXT_PACKAGE="gnome-builder"',
-    '-DPACKAGE_DATADIR="@0@"'.format(join_paths(get_option('prefix'),
-                                                get_option('datadir'),
-                                                'gnome-builder')),
-  ],
-  link_args: plugin_link_args,
-  link_depends: plugin_link_deps,
-  install: true,
-  install_dir: plugindir,
-  install_rpath: pkglibdir_abs,
+vala_pack_plugin = static_library('vala-pack-plugin', vala_pack_sources,
+  dependencies: vala_pack_deps,
+     vala_args: [ '--target-glib=2.52',
+                  '--pkg=posix',
+                  '--pkg=libpeas-1.0',
+                  '--pkg=gtksourceview-3.0',
+                  '--pkg=gio-2.0',
+                  '--pkg=libvala-' + libvala_version,
+                  '--pkg=libdazzle-1.0',
+                ],
+        c_args: [ '-DVALA_VERSION="@0@"'.format(libvala_version),
+                  '-DLOG_DOMAIN="vala-pack-plugin"',
+                  '-DGETTEXT_PACKAGE="gnome-builder"',
+                  '-DPACKAGE_DATADIR="@0@"'.format(join_paths(get_option('prefix'), get_option('datadir'), 'gnome-builder')),
+                ],
 )
 
-configure_file(
-          input: 'vala-pack.plugin',
-         output: 'vala-pack.plugin',
-  configuration: configuration_data(),
-        install: true,
-    install_dir: plugindir,
-)
+gnome_builder_plugins_link_whole += [vala_pack_plugin]
+gnome_builder_plugins_sources += vala_pack_resources[0]
 
 endif

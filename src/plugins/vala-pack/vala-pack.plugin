@@ -11,3 +11,4 @@ X-Indenter-Languages=vala
 X-Indenter-Languages-Priority=0
 X-Symbol-Resolver-Languages=vala
 X-Symbol-Resolver-Languages-Priority=100
+Embedded=ide_vala_pack_register_types
