@@ -1,6 +1,6 @@
 /* gstyle-palette.c
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gstyle-palette"
@@ -123,7 +125,7 @@ gstyle_palette_xml_get_header (xmlTextReaderPtr   reader,
         }
 
       if (gstyle_utf8_is_spaces (*name))
-        g_clear_pointer (name, g_free);
+        gstyle_clear_pointer (name, g_free);
     }
 
   return (*id != NULL);
@@ -144,7 +146,7 @@ gstyle_palette_xml_get_color (xmlTextReaderPtr reader)
     {
       name = strdup_and_xmlfree (xmlTextReaderGetAttribute (reader, CHAR_TO_XML ("name")));
       if (gstyle_utf8_is_spaces (name))
-        g_clear_pointer (&name, g_free);
+        gstyle_clear_pointer (&name, g_free);
 
       value = strdup_and_xmlfree (xmlTextReaderGetAttribute (reader, CHAR_TO_XML ("value")));
       if (!gstyle_str_empty0 (value))
@@ -480,7 +482,7 @@ read_gpl_header (GDataInputStream   *stream,
         {
           *palette_name = g_strdup (g_strstrip (&line[5]));
           if (gstyle_utf8_is_spaces (*palette_name))
-            g_clear_pointer (palette_name, g_free);
+            gstyle_clear_pointer (palette_name, g_free);
 
           g_free (line);
 
@@ -870,7 +872,8 @@ gstyle_palette_save_to_xml (GstylePalette  *self,
   gint n_colors;
   gint succes;
 
-  gchar *header = "Copyright © 2016 GNOME Builder Team at irc.gimp.net/#gnome-builder\n" \
+  const gchar *header =
+                  "Copyright 2016 GNOME Builder Team at irc.gimp.net/#gnome-builder\n"   \
                   "This program is free software: you can redistribute it and/or modify\n" \
                   "it under the terms of the GNU General Public License as published by\n" \
                   "the Free Software Foundation, either version 3 of the License, or\n"    \
@@ -1105,11 +1108,11 @@ gstyle_palette_finalize (GObject *object)
 {
   GstylePalette *self = GSTYLE_PALETTE (object);
 
-  g_clear_pointer (&self->colors, g_ptr_array_unref);
-  g_clear_pointer (&self->color_names, g_hash_table_unref);
-  g_clear_pointer (&self->name, g_free);
-  g_clear_pointer (&self->id, g_free);
-  g_clear_pointer (&self->gettext_domain, g_free);
+  gstyle_clear_pointer (&self->colors, g_ptr_array_unref);
+  gstyle_clear_pointer (&self->color_names, g_hash_table_unref);
+  gstyle_clear_pointer (&self->name, g_free);
+  gstyle_clear_pointer (&self->id, g_free);
+  gstyle_clear_pointer (&self->gettext_domain, g_free);
   g_clear_object (&self->file);
 
   G_OBJECT_CLASS (gstyle_palette_parent_class)->finalize (object);

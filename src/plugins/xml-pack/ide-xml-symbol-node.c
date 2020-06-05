@@ -1,6 +1,6 @@
 /* ide-xml-symbol-node.c
  *
- * Copyright © 2017 Sébastien Lafargue <slafargue@gnome.org>
+ * Copyright 2017 Sébastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,10 +14,14 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 
 #define G_LOG_DOMAIN "ide-xml-symbol-node"
+
+#include <dazzle.h>
 
 #include "ide-xml-symbol-node.h"
 
@@ -78,38 +82,32 @@ ide_xml_symbol_node_get_location_async (IdeSymbolNode       *node,
                                         gpointer             user_data)
 {
   IdeXmlSymbolNode *self = (IdeXmlSymbolNode *)node;
-  g_autoptr(GTask) task = NULL;
-  IdeContext *context;
-  g_autoptr(IdeFile) ifile = NULL;
-  IdeSourceLocation *ret;
+  g_autoptr(IdeTask) task = NULL;
+  IdeLocation *ret;
 
   g_return_if_fail (IDE_IS_XML_SYMBOL_NODE (self));
   g_return_if_fail (G_IS_FILE (self->file));
   g_return_if_fail (cancellable == NULL || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, ide_xml_symbol_node_get_location_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, ide_xml_symbol_node_get_location_async);
 
-  context = ide_object_get_context (IDE_OBJECT (self));
-  ifile = ide_file_new (context, self->file);
+  ret = ide_location_new (self->file,
+                          self->start_tag.start_line - 1,
+                          self->start_tag.start_line_offset - 1);
 
-  ret = ide_source_location_new (ifile,
-                                 self->start_tag.start_line - 1,
-                                 self->start_tag.start_line_offset - 1,
-                                 0);
-
-  g_task_return_pointer (task, ret, (GDestroyNotify)ide_source_location_unref);
+  ide_task_return_pointer (task, ret, g_object_unref);
 }
 
-static IdeSourceLocation *
+static IdeLocation *
 ide_xml_symbol_node_get_location_finish (IdeSymbolNode  *node,
                                          GAsyncResult   *result,
                                          GError        **error)
 {
   g_return_val_if_fail (IDE_IS_XML_SYMBOL_NODE (node), NULL);
-  g_return_val_if_fail (G_IS_TASK (result), NULL);
+  g_return_val_if_fail (IDE_IS_TASK (result), NULL);
 
-  return g_task_propagate_pointer (G_TASK (result), error);
+  return ide_task_propagate_pointer (IDE_TASK (result), error);
 }
 
 static void

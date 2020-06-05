@@ -1,6 +1,6 @@
 /* gb-color-picker-prefs.c
  *
- * Copyright © 2016 Sebastien Lafargue <slafargue@gnome.org>
+ * Copyright 2016 Sebastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,11 +14,13 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #include <glib/gi18n.h>
 
-#include <ide.h>
+#include <libide-editor.h>
 
 #include "gb-color-picker-editor-addin.h"
 #include "gb-color-picker-prefs.h"
@@ -367,8 +369,8 @@ generate_palette_button_clicked_cb (GbColorPickerPrefs *self,
   g_assert (GB_IS_COLOR_PICKER_PREFS (self));
   g_assert (GTK_IS_BUTTON (button));
 
-  editor = gtk_widget_get_ancestor (GTK_WIDGET (self), IDE_TYPE_EDITOR_PERSPECTIVE);
-  addin = ide_editor_addin_find_by_module_name (IDE_EDITOR_PERSPECTIVE (editor), "color-picker-plugin");
+  editor = gtk_widget_get_ancestor (GTK_WIDGET (self), IDE_TYPE_EDITOR_SURFACE);
+  addin = ide_editor_addin_find_by_module_name (IDE_EDITOR_SURFACE (editor), "color-picker");
   palette = gb_color_picker_editor_addin_create_palette (GB_COLOR_PICKER_EDITOR_ADDIN (addin));
 
   if (palette != NULL)
@@ -544,13 +546,13 @@ gb_color_picker_prefs_set_panel (GbColorPickerPrefs *self,
           gb_color_picker_prefs_unbind_settings (self);
           gstyle_color_panel_set_prefs_pages (self->panel, NULL, NULL, NULL, NULL);
           gtk_list_box_bind_model (GTK_LIST_BOX (self->palettes_listbox), NULL, NULL, NULL, NULL);
-          dzl_clear_weak_pointer (&self->panel);
+          g_clear_weak_pointer (&self->panel);
           self->palette_widget = NULL;
         }
 
       if (panel != NULL && GSTYLE_IS_COLOR_PANEL (panel))
         {
-          dzl_set_weak_pointer (&self->panel, panel);
+          g_set_weak_pointer (&self->panel, panel);
           self->palette_widget = gstyle_color_panel_get_palette_widget (self->panel);
           self->palettes_store = gstyle_palette_widget_get_store (self->palette_widget);
           gtk_list_box_bind_model (GTK_LIST_BOX (self->palettes_listbox),
@@ -633,7 +635,7 @@ gb_color_picker_prefs_finalize (GObject *object)
 {
   GbColorPickerPrefs *self = (GbColorPickerPrefs *)object;
 
-  dzl_clear_weak_pointer (&self->panel);
+  g_clear_weak_pointer (&self->panel);
 
   g_clear_object (&self->components_page);
   g_clear_object (&self->color_strings_page);
@@ -680,7 +682,7 @@ gb_color_picker_prefs_init (GbColorPickerPrefs *self)
   g_type_ensure (GB_TYPE_COLOR_PICKER_PREFS_LIST);
   g_type_ensure (GB_TYPE_COLOR_PICKER_PREFS_PALETTE_LIST);
 
-  builder = gtk_builder_new_from_resource ("/org/gnome/builder/plugins/color-picker-plugin/gtk/color-picker-prefs.ui");
+  builder = gtk_builder_new_from_resource ("/plugins/color-picker/gtk/color-picker-prefs.ui");
 
   self->palettes_box = GB_COLOR_PICKER_PREFS_PALETTE_LIST (gtk_builder_get_object (builder, "palettes_box"));
   palettes_placeholder = GTK_WIDGET (gtk_builder_get_object (builder, "palettes_placeholder"));
@@ -728,7 +730,7 @@ gb_color_picker_prefs_init (GbColorPickerPrefs *self)
 
   g_object_unref (builder);
 
-  builder = gtk_builder_new_from_resource ("/org/gnome/builder/plugins/color-picker-plugin/gtk/color-picker-preview.ui");
+  builder = gtk_builder_new_from_resource ("/plugins/color-picker/gtk/color-picker-preview.ui");
   self->preview = GTK_WIDGET (gtk_builder_get_object (builder, "preview"));
   g_object_ref_sink (self->preview);
   self->preview_palette_widget = GTK_WIDGET (gtk_builder_get_object (builder, "preview_palette_widget"));

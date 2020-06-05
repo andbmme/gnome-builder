@@ -1,6 +1,6 @@
 /* test-gstyle-palette-widget.c
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #include <glib.h>
@@ -33,13 +35,18 @@ test_palette_widget (void)
 
   gtk_init (NULL, NULL);
 
-  window = gtk_window_new (GTK_WINDOW_TOPLEVEL);
-  gtk_window_set_default_size (GTK_WINDOW (window), 400,900);
+  window = g_object_new (GTK_TYPE_WINDOW,
+                         "type", GTK_WINDOW_TOPLEVEL,
+                         "default-width", 400,
+                         "default-height", 900,
+                         "visible", TRUE,
+                         NULL);
 
   box = g_object_new (GTK_TYPE_BOX,
                       "orientation", GTK_ORIENTATION_HORIZONTAL,
                       "expand", TRUE,
                       "spacing", 1,
+                      "visible", TRUE,
                       NULL);
 
   palette_widget = g_object_new (GSTYLE_TYPE_PALETTE_WIDGET, NULL);
@@ -60,7 +67,6 @@ test_palette_widget (void)
   gtk_container_add (GTK_CONTAINER (window), box);
   g_signal_connect (window, "destroy", G_CALLBACK (gtk_main_quit), NULL);
 
-  gtk_widget_show_all (window);
   gtk_main ();
 }
 

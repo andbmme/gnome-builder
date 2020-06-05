@@ -1,6 +1,6 @@
 /* ide-ctags-highlighter.c
  *
- * Copyright © 2015 Dimitris Zenios <dimitris.zenios@gmail.com>
+ * Copyright 2015 Dimitris Zenios <dimitris.zenios@gmail.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,9 +14,13 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "ide-ctags-highlighter"
+
+#include "config.h"
 
 #include <glib/gi18n.h>
 
@@ -34,12 +38,11 @@ struct _IdeCtagsHighlighter
 
 static void highlighter_iface_init (IdeHighlighterInterface *iface);
 
-G_DEFINE_DYNAMIC_TYPE_EXTENDED (IdeCtagsHighlighter,
-                                ide_ctags_highlighter,
-                                IDE_TYPE_OBJECT,
-                                0,
-                                G_IMPLEMENT_INTERFACE (IDE_TYPE_HIGHLIGHTER,
-                                                       highlighter_iface_init))
+G_DEFINE_TYPE_WITH_CODE (IdeCtagsHighlighter,
+                         ide_ctags_highlighter,
+                         IDE_TYPE_OBJECT,
+                         G_IMPLEMENT_INTERFACE (IDE_TYPE_HIGHLIGHTER,
+                                                highlighter_iface_init))
 
 static inline gboolean
 accepts_char (gunichar ch)
@@ -104,25 +107,26 @@ get_tag_from_kind (IdeCtagsIndexEntryKind kind)
 
 static const gchar *
 get_tag (IdeCtagsHighlighter *self,
-         IdeFile             *file,
+         GFile               *file,
          const gchar         *word)
 {
-  const gchar *file_path = ide_file_get_path (file);
+  const gchar *file_path = g_file_peek_path (file);
   const IdeCtagsIndexEntry *entries;
   gsize n_entries;
-  gsize i;
-  gsize j;
 
-  for (i = 0; i < self->indexes->len; i++)
+  for (guint i = 0; i < self->indexes->len; i++)
     {
       IdeCtagsIndex *item = g_ptr_array_index (self->indexes, i);
+
       entries = ide_ctags_index_lookup_prefix (item, word, &n_entries);
       if ((entries == NULL) || (n_entries == 0))
         continue;
 
-      for (j = 0; j < n_entries; j++)
-        if (dzl_str_equal0 (entries[j].path, file_path))
-          return get_tag_from_kind (entries[j].kind);
+      for (guint j = 0; j < n_entries; j++)
+        {
+          if (ide_str_equal0 (entries[j].path, file_path))
+            return get_tag_from_kind (entries[j].kind);
+        }
 
       return get_tag_from_kind (entries[0].kind);
     }
@@ -140,7 +144,7 @@ ide_ctags_highlighter_real_update (IdeHighlighter       *highlighter,
   GtkTextBuffer *text_buffer;
   GtkSourceBuffer *source_buffer;
   IdeBuffer *buffer;
-  IdeFile *file;
+  GFile *file;
   GtkTextIter begin;
   GtkTextIter end;
 
@@ -240,20 +244,20 @@ ide_ctags_highlighter_real_set_engine (IdeHighlighter      *highlighter,
                                        IdeHighlightEngine  *engine)
 {
   IdeCtagsHighlighter *self = (IdeCtagsHighlighter *)highlighter;
+  g_autoptr(IdeCtagsService) service = NULL;
   IdeContext *context;
-  IdeCtagsService *service;
 
   g_return_if_fail (IDE_IS_CTAGS_HIGHLIGHTER (self));
   g_return_if_fail (IDE_IS_HIGHLIGHT_ENGINE (engine));
 
   self->engine = engine;
 
-  context = ide_object_get_context (IDE_OBJECT (self));
-  service = ide_context_get_service_typed (context, IDE_TYPE_CTAGS_SERVICE);
-
-  dzl_set_weak_pointer (&self->service, service);
-
-  ide_ctags_service_register_highlighter (service, self);
+  if ((context = ide_object_get_context (IDE_OBJECT (self))) &&
+      (service = ide_object_get_child_typed (IDE_OBJECT (context), IDE_TYPE_CTAGS_SERVICE)))
+    {
+      g_set_weak_pointer (&self->service, service);
+      ide_ctags_service_register_highlighter (service, self);
+    }
 }
 
 static void
@@ -264,7 +268,7 @@ ide_ctags_highlighter_finalize (GObject *object)
   if (self->service != NULL)
     {
       ide_ctags_service_unregister_highlighter (self->service, self);
-      dzl_clear_weak_pointer (&self->service);
+      g_clear_weak_pointer (&self->service);
     }
 
   g_clear_pointer (&self->indexes, g_ptr_array_unref);
@@ -281,11 +285,6 @@ ide_ctags_highlighter_class_init (IdeCtagsHighlighterClass *klass)
 }
 
 static void
-ide_ctags_highlighter_class_finalize (IdeCtagsHighlighterClass *klass)
-{
-}
-
-static void
 ide_ctags_highlighter_init (IdeCtagsHighlighter *self)
 {
   self->indexes = g_ptr_array_new_with_free_func (g_object_unref);
@@ -296,10 +295,4 @@ highlighter_iface_init (IdeHighlighterInterface *iface)
 {
   iface->update = ide_ctags_highlighter_real_update;
   iface->set_engine = ide_ctags_highlighter_real_set_engine;
-}
-
-void
-_ide_ctags_highlighter_register_type (GTypeModule *module)
-{
-  ide_ctags_highlighter_register_type (module);
 }

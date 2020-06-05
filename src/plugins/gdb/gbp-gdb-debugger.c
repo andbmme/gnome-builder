@@ -1,6 +1,6 @@
 /* gbp-gdb-debugger.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,15 +14,17 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gbp-gdb-debugger"
 
 #include <dazzle.h>
+#include <libide-io.h>
 #include <string.h>
 
 #include "gbp-gdb-debugger.h"
-#include "util/ide-glib.h"
 
 #define READ_BUFFER_LEN 4096
 
@@ -63,36 +65,49 @@ typedef struct
 
 G_DEFINE_TYPE (GbpGdbDebugger, gbp_gdb_debugger, IDE_TYPE_DEBUGGER)
 
+#define DEBUG_LOG(dir,msg)                                 \
+  G_STMT_START {                                           \
+    IdeLineReader reader;                                  \
+    const gchar *line;                                     \
+    gsize len;                                             \
+    ide_line_reader_init (&reader, msg, -1);               \
+    while ((line = ide_line_reader_next (&reader, &len)))  \
+      {                                                    \
+        g_autofree gchar *copy = g_strndup (line, len);    \
+        g_debug ("%s: %s", dir, copy);                     \
+      }                                                    \
+  } G_STMT_END
+
 static void
-gbp_gdb_debugger_set_context (IdeObject  *object,
-                              IdeContext *context)
+gbp_gdb_debugger_parent_set (IdeObject *object,
+                             IdeObject *parent)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)object;
+  IdeBuildManager *build_manager;
+  IdePipeline *pipeline;
+  const gchar *builddir;
+  IdeContext *context;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
-  g_assert (!context || IDE_IS_CONTEXT (context));
+  g_assert (!parent || IDE_IS_OBJECT (parent));
 
-  IDE_OBJECT_CLASS (gbp_gdb_debugger_parent_class)->set_context (object, context);
+  if (parent == NULL)
+    return;
 
-  if (context != NULL)
-    {
-      IdeBuildManager *build_manager;
-      IdeBuildPipeline *pipeline;
-      const gchar *builddir;
+  context = ide_object_get_context (parent);
 
-      /*
-       * We need to save the build directory so that we can translate
-       * relative paths coming from gdb into the path within the project
-       * source tree.
-       */
+  /*
+   * We need to save the build directory so that we can translate
+   * relative paths coming from gdb into the path within the project
+   * source tree.
+   */
 
-      build_manager = ide_context_get_build_manager (context);
-      pipeline = ide_build_manager_get_pipeline (build_manager);
-      builddir = ide_build_pipeline_get_builddir (pipeline);
+  build_manager = ide_build_manager_from_context (context);
+  pipeline = ide_build_manager_get_pipeline (build_manager);
+  builddir = ide_pipeline_get_builddir (pipeline);
 
-      g_clear_object (&self->builddir);
-      self->builddir = g_file_new_for_path (builddir);
-    }
+  g_clear_object (&self->builddir);
+  self->builddir = g_file_new_for_path (builddir);
 }
 
 static gchar *
@@ -100,7 +115,6 @@ gbp_gdb_debugger_translate_path (GbpGdbDebugger *self,
                                  const gchar    *path)
 {
   g_autoptr(GFile) file = NULL;
-  g_autoptr(GFile) result = NULL;
   IdeRuntime *runtime = NULL;
   IdeRunner *runner;
 
@@ -147,12 +161,12 @@ gbp_gdb_debugger_panic (GbpGdbDebugger *self)
 
   for (const GList *iter = list; iter != NULL; iter = iter->next)
     {
-      g_autoptr(GTask) task = iter->data;
+      g_autoptr(IdeTask) task = iter->data;
 
-      g_task_return_new_error (task,
-                               G_IO_ERROR,
-                               G_IO_ERROR_FAILED,
-                               "There was a communication failure");
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_FAILED,
+                                 "There was a communication failure");
     }
 
   g_list_free (list);
@@ -173,7 +187,7 @@ gbp_gdb_debugger_unwrap (const struct gdbwire_mi_output  *output,
           output->variant.result_record->result->kind == GDBWIRE_MI_CSTRING)
         msg = output->variant.result_record->result->variant.cstring;
 
-      g_debug ("%s", msg);
+      g_debug ("gdb-error: %s", msg);
 
       g_set_error_literal (error,
                            G_IO_ERROR,
@@ -185,17 +199,13 @@ gbp_gdb_debugger_unwrap (const struct gdbwire_mi_output  *output,
   return FALSE;
 }
 
-static GTask *
+static IdeTask *
 gbp_gdb_debugger_find_task (GbpGdbDebugger           *self,
                             struct gdbwire_mi_output *output)
 {
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (output != NULL);
   g_assert (output->line != NULL);
-
-  /* Ignore thread switches */
-  if (g_str_has_prefix (output->line, "9999^"))
-    return NULL;
 
   if (g_ascii_isdigit (output->line[0]))
     {
@@ -209,8 +219,8 @@ gbp_gdb_debugger_find_task (GbpGdbDebugger           *self,
 
       for (GList *iter = self->cmdqueue.head; iter; iter = iter->next)
         {
-          GTask *task = iter->data;
-          const gchar *task_id = g_task_get_task_data (task);
+          IdeTask *task = iter->data;
+          const gchar *task_id = ide_task_get_task_data (task);
 
           if (strcmp (id, task_id) == 0)
             {
@@ -258,7 +268,7 @@ static void
 gbp_gdb_debugger_handle_result (GbpGdbDebugger           *self,
                                 struct gdbwire_mi_output *output)
 {
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (output->kind == GDBWIRE_MI_OUTPUT_RESULT);
@@ -268,12 +278,11 @@ gbp_gdb_debugger_handle_result (GbpGdbDebugger           *self,
 
   if (task != NULL)
     {
-      g_task_return_pointer (task, output, (GDestroyNotify)gdbwire_mi_output_free);
+      ide_task_return_pointer (task, output, gdbwire_mi_output_free);
       return;
     }
 
-  if (!g_str_has_prefix (output->line, "9999^"))
-    ide_object_warning (self, "gdb: No reply found for: %s", output->line);
+  ide_object_warning (self, "gdb: No reply found for: %s", output->line);
 
   gdbwire_mi_output_free (output);
 }
@@ -526,9 +535,11 @@ gbp_gdb_debugger_handle_stopped (GbpGdbDebugger                 *self,
 {
   IdeDebuggerStopReason stop_reason;
   g_autoptr(IdeDebuggerBreakpoint) breakpoint = NULL;
+  g_autoptr(IdeDebuggerThread) thread = NULL;
   g_autofree gchar *file = NULL;
   g_autofree gchar *fullname = NULL;
-  G_GNUC_UNUSED const gchar *thread_id = NULL;
+  const gchar *thread_id = NULL;
+  const gchar *group_id = NULL;
   const struct gdbwire_mi_result *iter;
   const gchar *id = NULL;
   const gchar *reason = NULL;
@@ -561,6 +572,8 @@ gbp_gdb_debugger_handle_stopped (GbpGdbDebugger                 *self,
             disp = iter->variant.cstring;
           else if (g_strcmp0 (iter->variable, "bkptno") == 0)
             id = iter->variant.cstring;
+          else if (g_strcmp0 (iter->variable, "group-id") == 0)
+            group_id = iter->variant.cstring;
         }
       else if (iter->kind == GDBWIRE_MI_TUPLE)
         {
@@ -644,6 +657,10 @@ gbp_gdb_debugger_handle_stopped (GbpGdbDebugger                 *self,
 
   gbp_gdb_debugger_reload_breakpoints (self);
 
+  thread = ide_debugger_thread_new (thread_id);
+  ide_debugger_thread_set_group (thread, group_id);
+
+  ide_debugger_emit_thread_selected (IDE_DEBUGGER (self), thread);
   ide_debugger_emit_stopped (IDE_DEBUGGER (self), stop_reason, breakpoint);
 }
 
@@ -913,11 +930,13 @@ gbp_gdb_debugger_output_callback (void                     *context,
       break;
 
     case GDBWIRE_MI_OUTPUT_OOB:
+      DEBUG_LOG ("from-gdb (OOB)", output->line);
       gbp_gdb_debugger_handle_oob (self, output);
       gdbwire_mi_output_free (output);
       break;
 
     case GDBWIRE_MI_OUTPUT_RESULT:
+      DEBUG_LOG ("from-gdb (RES)", output->line);
       /* handle result steals output pointer */
       gbp_gdb_debugger_handle_result (self, output);
       break;
@@ -939,7 +958,7 @@ gbp_gdb_debugger_list_breakpoints_cb (GObject      *object,
                                       gpointer      user_data)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)object;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GPtrArray) ar = NULL;
   g_autoptr(GError) error = NULL;
   struct gdbwire_mi_command *command = NULL;
@@ -948,13 +967,13 @@ gbp_gdb_debugger_list_breakpoints_cb (GObject      *object,
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   output = gbp_gdb_debugger_exec_finish (self, result, &error);
 
   if (output == NULL)
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
@@ -965,10 +984,10 @@ gbp_gdb_debugger_list_breakpoints_cb (GObject      *object,
 
   if (res != GDBWIRE_OK)
     {
-      g_task_return_new_error (task,
-                               G_IO_ERROR,
-                               G_IO_ERROR_INVAL,
-                               "Invalid reply from gdb");
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_INVAL,
+                                 "Invalid reply from gdb");
       return;
     }
 
@@ -1030,7 +1049,7 @@ gbp_gdb_debugger_list_breakpoints_cb (GObject      *object,
         }
     }
 
-  g_task_return_pointer (task, g_steal_pointer (&ar), (GDestroyNotify)g_ptr_array_unref);
+  ide_task_return_pointer (task, g_steal_pointer (&ar), g_ptr_array_unref);
 
   gdbwire_mi_command_free (command);
   gdbwire_mi_output_free (output);
@@ -1102,7 +1121,6 @@ gbp_gdb_debugger_reload_breakpoints (GbpGdbDebugger *self)
   g_assert (GBP_IS_GDB_DEBUGGER (self));
 
   gbp_gdb_debugger_exec_async (self,
-                               NULL,
                                "-break-list",
                                NULL,
                                gbp_gdb_debugger_reload_breakpoints_cb,
@@ -1116,17 +1134,16 @@ gbp_gdb_debugger_list_breakpoints_async (IdeDebugger         *debugger,
                                          gpointer             user_data)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)debugger;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_priority (task, G_PRIORITY_LOW);
-  g_task_set_source_tag (task, gbp_gdb_debugger_list_breakpoints_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
+  ide_task_set_source_tag (task, gbp_gdb_debugger_list_breakpoints_async);
 
   gbp_gdb_debugger_exec_async (self,
-                               NULL,
                                "-break-info",
                                cancellable,
                                gbp_gdb_debugger_list_breakpoints_cb,
@@ -1138,10 +1155,14 @@ gbp_gdb_debugger_list_breakpoints_finish (IdeDebugger   *debugger,
                                           GAsyncResult  *result,
                                           GError       **error)
 {
-  g_assert (GBP_IS_GDB_DEBUGGER (debugger));
-  g_assert (G_IS_TASK (result));
+  GPtrArray *ret;
 
-  return g_task_propagate_pointer (G_TASK (result), error);
+  g_assert (GBP_IS_GDB_DEBUGGER (debugger));
+  g_assert (IDE_IS_TASK (result));
+
+  ret = ide_task_propagate_pointer (IDE_TASK (result), error);
+
+  return IDE_PTR_ARRAY_STEAL_FULL (&ret);
 }
 
 static void
@@ -1150,19 +1171,19 @@ gbp_gdb_debugger_insert_breakpoint_cb (GObject      *object,
                                        gpointer      user_data)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)object;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
   struct gdbwire_mi_output *output;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   output = gbp_gdb_debugger_exec_finish (self, result, &error);
 
   if (output == NULL || gbp_gdb_debugger_unwrap (output, &error))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       g_clear_pointer (&output, gdbwire_mi_output_free);
       return;
     }
@@ -1175,14 +1196,14 @@ gbp_gdb_debugger_insert_breakpoint_cb (GObject      *object,
                                           output,
                                           output->variant.result_record->result,
                                           GDBWIRE_MI_ASYNC_BREAKPOINT_CREATED);
-      g_task_return_boolean (task, TRUE);
+      ide_task_return_boolean (task, TRUE);
     }
   else
     {
-      g_task_return_new_error (task,
-                               G_IO_ERROR,
-                               G_IO_ERROR_FAILED,
-                               "Failed to decode breakpoint reply");
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_FAILED,
+                                 "Failed to decode breakpoint reply");
     }
 
   gdbwire_mi_output_free (output);
@@ -1198,7 +1219,7 @@ gbp_gdb_debugger_insert_breakpoint_async (IdeDebugger           *debugger,
   GbpGdbDebugger *self = (GbpGdbDebugger *)debugger;
   g_autofree gchar *translated_file = NULL;
   g_autoptr(GString) command = NULL;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autoptr(GFile) gfile = NULL;
   IdeDebuggerAddress addr;
   const gchar *func;
@@ -1211,16 +1232,22 @@ gbp_gdb_debugger_insert_breakpoint_async (IdeDebugger           *debugger,
   g_assert (IDE_IS_DEBUGGER_BREAKPOINT (breakpoint));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_priority (task, G_PRIORITY_LOW);
-  g_task_set_source_tag (task, gbp_gdb_debugger_insert_breakpoint_async);
-  g_task_set_return_on_cancel (task, TRUE);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
+  ide_task_set_source_tag (task, gbp_gdb_debugger_insert_breakpoint_async);
+  ide_task_set_return_on_cancel (task, TRUE);
 
   command = g_string_new ("-break-insert");
 
   if (!ide_debugger_breakpoint_get_enabled (breakpoint))
     g_string_append (command, " -d");
 
+  /*
+   * We don't have a strict "countpoint", so we just set a really high
+   * number for the ignore count in gdb.
+   */
+  if (ide_debugger_breakpoint_get_mode (breakpoint) == IDE_DEBUGGER_BREAK_COUNTPOINT)
+    g_string_append_printf (command, " -i %d", G_MAXINT);
 
   file = ide_debugger_breakpoint_get_file (breakpoint);
   func = ide_debugger_breakpoint_get_function (breakpoint);
@@ -1253,10 +1280,10 @@ gbp_gdb_debugger_insert_breakpoint_async (IdeDebugger           *debugger,
     }
   else
     {
-      g_task_return_new_error (task,
-                               G_IO_ERROR,
-                               G_IO_ERROR_FAILED,
-                               "Failed to create breakpoint based on request");
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_FAILED,
+                                 "Failed to create breakpoint based on request");
       return;
     }
 
@@ -1267,7 +1294,6 @@ gbp_gdb_debugger_insert_breakpoint_async (IdeDebugger           *debugger,
     g_string_append_printf (command, " -c %s", spec);
 
   gbp_gdb_debugger_exec_async (self,
-                               NULL,
                                command->str,
                                cancellable,
                                gbp_gdb_debugger_insert_breakpoint_cb,
@@ -1280,9 +1306,9 @@ gbp_gdb_debugger_insert_breakpoint_finish (IdeDebugger   *debugger,
                                            GError       **error)
 {
   g_assert (GBP_IS_GDB_DEBUGGER (debugger));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_TASK (result));
 
-  return g_task_propagate_boolean (G_TASK (result), error);
+  return ide_task_propagate_boolean (IDE_TASK (result), error);
 }
 
 static void
@@ -1291,29 +1317,28 @@ gbp_gdb_debugger_remove_breakpoint_cb (GObject      *object,
                                        gpointer      user_data)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)object;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
   struct gdbwire_mi_output *output;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   output = gbp_gdb_debugger_exec_finish (self, result, &error);
 
   if (output == NULL || gbp_gdb_debugger_unwrap (output, &error))
-    g_task_return_error (task, g_steal_pointer (&error));
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
     {
-      const gchar *id = g_task_get_task_data (task);
-      g_autoptr(IdeDebuggerBreakpoint) breakpoint = NULL;
+      IdeDebuggerBreakpoint *breakpoint = ide_task_get_task_data (task);
 
-      g_assert (id != NULL);
+      g_assert (IDE_IS_DEBUGGER_BREAKPOINT (breakpoint));
+      g_assert (ide_debugger_breakpoint_get_id (breakpoint) != NULL);
 
-      breakpoint = ide_debugger_breakpoint_new (id);
       ide_debugger_emit_breakpoint_removed (IDE_DEBUGGER (self), breakpoint);
 
-      g_task_return_boolean (task, TRUE);
+      ide_task_return_boolean (task, TRUE);
     }
 
   g_clear_pointer (&output, gdbwire_mi_output_free);
@@ -1327,7 +1352,7 @@ gbp_gdb_debugger_remove_breakpoint_async (IdeDebugger           *debugger,
                                           gpointer               user_data)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)debugger;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autofree gchar *command = NULL;
   const gchar *id;
 
@@ -1337,25 +1362,24 @@ gbp_gdb_debugger_remove_breakpoint_async (IdeDebugger           *debugger,
 
   id = ide_debugger_breakpoint_get_id (breakpoint);
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_priority (task, G_PRIORITY_LOW);
-  g_task_set_source_tag (task, gbp_gdb_debugger_remove_breakpoint_async);
-  g_task_set_task_data (task, g_strdup (id), g_free);
-  g_task_set_return_on_cancel (task, TRUE);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
+  ide_task_set_source_tag (task, gbp_gdb_debugger_remove_breakpoint_async);
+  ide_task_set_task_data (task, g_object_ref (breakpoint), g_object_unref);
+  ide_task_set_return_on_cancel (task, TRUE);
 
   if (id == NULL)
     {
-      g_task_return_new_error (task,
-                               G_IO_ERROR,
-                               G_IO_ERROR_INVAL,
-                               "Invalid breakpoint identifier");
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_INVAL,
+                                 "Invalid breakpoint identifier");
       return;
     }
 
   command = g_strdup_printf ("-break-delete %s", id);
 
   gbp_gdb_debugger_exec_async (self,
-                               NULL,
                                command,
                                cancellable,
                                gbp_gdb_debugger_remove_breakpoint_cb,
@@ -1368,9 +1392,9 @@ gbp_gdb_debugger_remove_breakpoint_finish (IdeDebugger   *debugger,
                                            GError       **error)
 {
   g_assert (GBP_IS_GDB_DEBUGGER (debugger));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_TASK (result));
 
-  return g_task_propagate_boolean (G_TASK (result), error);
+  return ide_task_propagate_boolean (IDE_TASK (result), error);
 }
 
 static void
@@ -1406,19 +1430,19 @@ gbp_gdb_debugger_move_cb (GObject      *object,
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)object;
   struct gdbwire_mi_output *output;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   output = gbp_gdb_debugger_exec_finish (self, result, &error);
 
   if (output == NULL || gbp_gdb_debugger_unwrap (output, &error))
-    g_task_return_error (task, g_steal_pointer (&error));
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
-    g_task_return_boolean (task, TRUE);
+    ide_task_return_boolean (task, TRUE);
 
   g_clear_pointer (&output, gdbwire_mi_output_free);
 }
@@ -1431,16 +1455,16 @@ gbp_gdb_debugger_move_async (IdeDebugger         *debugger,
                              gpointer             user_data)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)debugger;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   const gchar *command = NULL;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (IDE_IS_DEBUGGER_MOVEMENT (movement));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_priority (task, G_PRIORITY_LOW);
-  g_task_set_source_tag (task, gbp_gdb_debugger_move_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
+  ide_task_set_source_tag (task, gbp_gdb_debugger_move_async);
 
   switch (movement)
     {
@@ -1469,7 +1493,6 @@ gbp_gdb_debugger_move_async (IdeDebugger         *debugger,
     }
 
   gbp_gdb_debugger_exec_async (self,
-                               NULL,
                                command,
                                cancellable,
                                gbp_gdb_debugger_move_cb,
@@ -1481,7 +1504,6 @@ gbp_gdb_debugger_move_async (IdeDebugger         *debugger,
    */
   if (self->register_names == NULL)
     gbp_gdb_debugger_exec_async (self,
-                                 NULL,
                                  "-data-list-register-names",
                                  NULL,
                                  gbp_gdb_debugger_list_register_names_cb,
@@ -1494,9 +1516,9 @@ gbp_gdb_debugger_move_finish (IdeDebugger   *debugger,
                               GError       **error)
 {
   g_assert (GBP_IS_GDB_DEBUGGER (debugger));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_TASK (result));
 
-  return g_task_propagate_boolean (G_TASK (result), error);
+  return ide_task_propagate_boolean (IDE_TASK (result), error);
 }
 
 static void
@@ -1505,20 +1527,20 @@ gbp_gdb_debugger_list_frames_cb (GObject      *object,
                                  gpointer      user_data)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)object;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
   g_autoptr(GPtrArray) ar = NULL;
   struct gdbwire_mi_output *output;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   output = gbp_gdb_debugger_exec_finish (self, result, &error);
 
   if (output == NULL || gbp_gdb_debugger_unwrap (output, &error))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       goto cleanup;
     }
 
@@ -1593,7 +1615,7 @@ gbp_gdb_debugger_list_frames_cb (GObject      *object,
         }
     }
 
-  g_task_return_pointer (task, g_steal_pointer (&ar), (GDestroyNotify)g_ptr_array_unref);
+  ide_task_return_pointer (task, g_steal_pointer (&ar), g_ptr_array_unref);
 
 cleanup:
   g_clear_pointer (&output, gdbwire_mi_output_free);
@@ -1607,23 +1629,27 @@ gbp_gdb_debugger_list_frames_async (IdeDebugger         *debugger,
                                     gpointer             user_data)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)debugger;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
+  g_autofree gchar *command = NULL;
+  const gchar *tid = NULL;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (IDE_DEBUGGER_THREAD (thread));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_priority (task, G_PRIORITY_LOW);
-  g_task_set_source_tag (task, gbp_gdb_debugger_list_frames_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
+  ide_task_set_source_tag (task, gbp_gdb_debugger_list_frames_async);
 
   /* TODO: We are expected to be stopped here, but we should also make sure
    *       the appropriate thread is selected first.
    */
 
+  tid = ide_debugger_thread_get_id (thread);
+  command = g_strdup_printf ("-stack-list-frames --thread %s", tid);
+
   gbp_gdb_debugger_exec_async (self,
-                               thread,
-                               "-stack-list-frames",
+                               command,
                                cancellable,
                                gbp_gdb_debugger_list_frames_cb,
                                g_steal_pointer (&task));
@@ -1634,10 +1660,14 @@ gbp_gdb_debugger_list_frames_finish (IdeDebugger   *debugger,
                                      GAsyncResult  *result,
                                      GError       **error)
 {
-  g_assert (GBP_IS_GDB_DEBUGGER (debugger));
-  g_assert (G_IS_TASK (result));
+  GPtrArray *ret;
 
-  return g_task_propagate_pointer (G_TASK (result), error);
+  g_assert (GBP_IS_GDB_DEBUGGER (debugger));
+  g_assert (IDE_IS_TASK (result));
+
+  ret = ide_task_propagate_pointer (IDE_TASK (result), error);
+
+  return IDE_PTR_ARRAY_STEAL_FULL (&ret);
 }
 
 static void
@@ -1647,19 +1677,19 @@ gbp_gdb_debugger_interrupt_cb (GObject      *object,
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)object;
   struct gdbwire_mi_output *output;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   output = gbp_gdb_debugger_exec_finish (self, result, &error);
 
   if (output == NULL || gbp_gdb_debugger_unwrap (output, &error))
-    g_task_return_error (task, g_steal_pointer (&error));
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
-    g_task_return_boolean (task, TRUE);
+    ide_task_return_boolean (task, TRUE);
 
   g_clear_pointer (&output, gdbwire_mi_output_free);
 }
@@ -1672,18 +1702,17 @@ gbp_gdb_debugger_interrupt_async (IdeDebugger            *debugger,
                                   gpointer                user_data)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)debugger;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (!thread_group || IDE_IS_DEBUGGER_THREAD_GROUP (thread_group));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_priority (task, G_PRIORITY_LOW);
-  g_task_set_source_tag (task, gbp_gdb_debugger_interrupt_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
+  ide_task_set_source_tag (task, gbp_gdb_debugger_interrupt_async);
 
   gbp_gdb_debugger_exec_async (self,
-                               NULL,
                                "-exec-interrupt --all",
                                cancellable,
                                gbp_gdb_debugger_interrupt_cb,
@@ -1696,9 +1725,9 @@ gbp_gdb_debugger_interrupt_finish (IdeDebugger   *debugger,
                                    GError       **error)
 {
   g_assert (GBP_IS_GDB_DEBUGGER (debugger));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_TASK (result));
 
-  return g_task_propagate_boolean (G_TASK (result), error);
+  return ide_task_propagate_boolean (IDE_TASK (result), error);
 }
 
 static void
@@ -1708,12 +1737,12 @@ gbp_gdb_debugger_send_signal_cb (GObject      *object,
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)object;
   struct gdbwire_mi_output *output;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   output = gbp_gdb_debugger_exec_finish (self, result, &error);
 
@@ -1722,9 +1751,9 @@ gbp_gdb_debugger_send_signal_cb (GObject      *object,
    */
 
   if (error != NULL || gbp_gdb_debugger_unwrap (output, &error))
-    g_task_return_error (task, g_steal_pointer (&error));
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
-    g_task_return_boolean (task, TRUE);
+    ide_task_return_boolean (task, TRUE);
 
   g_clear_pointer (&output, gdbwire_mi_output_free);
 }
@@ -1738,20 +1767,19 @@ gbp_gdb_debugger_send_signal_async (IdeDebugger         *debugger,
                                     gpointer             user_data)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)debugger;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autofree gchar *command = NULL;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_priority (task, G_PRIORITY_LOW);
-  g_task_set_source_tag (task, gbp_gdb_debugger_send_signal_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
+  ide_task_set_source_tag (task, gbp_gdb_debugger_send_signal_async);
 
   command = g_strdup_printf ("signal %d", signum);
 
   gbp_gdb_debugger_exec_async (self,
-                               NULL,
                                command,
                                cancellable,
                                gbp_gdb_debugger_send_signal_cb,
@@ -1764,9 +1792,9 @@ gbp_gdb_debugger_send_signal_finish (IdeDebugger   *debugger,
                                      GError       **error)
 {
   g_assert (GBP_IS_GDB_DEBUGGER (debugger));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_TASK (result));
 
-  return g_task_propagate_boolean (G_TASK (result), error);
+  return ide_task_propagate_boolean (IDE_TASK (result), error);
 }
 
 static void
@@ -1776,19 +1804,19 @@ gbp_gdb_debugger_modify_breakpoint_cb (GObject      *object,
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)object;
   g_autoptr(GError) error = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   struct gdbwire_mi_output *output;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   output = gbp_gdb_debugger_exec_finish (self, result, &error);
 
   if (output == NULL || gbp_gdb_debugger_unwrap (output, &error))
-    g_task_return_error (task, g_steal_pointer (&error));
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
-    g_task_return_boolean (task, TRUE);
+    ide_task_return_boolean (task, TRUE);
 
   gbp_gdb_debugger_reload_breakpoints (self);
 
@@ -1804,7 +1832,7 @@ gbp_gdb_debugger_modify_breakpoint_async (IdeDebugger                 *debugger,
                                           gpointer                     user_data)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)debugger;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autofree gchar *command = NULL;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
@@ -1812,9 +1840,9 @@ gbp_gdb_debugger_modify_breakpoint_async (IdeDebugger                 *debugger,
   g_assert (IDE_IS_DEBUGGER_BREAKPOINT (breakpoint));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, gbp_gdb_debugger_modify_breakpoint_async);
-  g_task_set_priority (task, G_PRIORITY_LOW);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, gbp_gdb_debugger_modify_breakpoint_async);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
 
   switch (change)
     {
@@ -1833,15 +1861,14 @@ gbp_gdb_debugger_modify_breakpoint_async (IdeDebugger                 *debugger,
 
   if (command == NULL)
     {
-      g_task_return_new_error (task,
-                               G_IO_ERROR,
-                               G_IO_ERROR_NOT_SUPPORTED,
-                               "Unsupported change requested");
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_NOT_SUPPORTED,
+                                 "Unsupported change requested");
       return;
     }
 
   gbp_gdb_debugger_exec_async (self,
-                               NULL,
                                command,
                                cancellable,
                                gbp_gdb_debugger_modify_breakpoint_cb,
@@ -1854,32 +1881,33 @@ gbp_gdb_debugger_modify_breakpoint_finish (IdeDebugger   *debugger,
                                            GError       **error)
 {
   g_assert (GBP_IS_GDB_DEBUGGER (debugger));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_TASK (result));
 
-  return g_task_propagate_boolean (G_TASK (result), error);
+  return ide_task_propagate_boolean (IDE_TASK (result), error);
 }
 
 static void
-gbp_gdb_debugger_list_locals_cb (GObject      *object,
-                                 GAsyncResult *result,
-                                 gpointer      user_data)
+gbp_gdb_debugger_handle_list_variables (GObject      *object,
+                                        GAsyncResult *result,
+                                        gpointer      user_data,
+                                        gboolean      arguments)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)object;
   g_autoptr(GError) error = NULL;
   g_autoptr(GPtrArray) ar = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   struct gdbwire_mi_output *output;
   struct gdbwire_mi_result *res;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   output = gbp_gdb_debugger_exec_finish (self, result, &error);
 
   if (output == NULL || gbp_gdb_debugger_unwrap (output, &error))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       goto cleanup;
     }
 
@@ -1890,7 +1918,7 @@ gbp_gdb_debugger_list_locals_cb (GObject      *object,
   res = output->variant.result_record->result;
 
   if (res->kind == GDBWIRE_MI_LIST &&
-      g_strcmp0 (res->variable, "locals") == 0)
+      g_strcmp0 (res->variable, "variables") == 0)
     {
       struct gdbwire_mi_result *iter;
 
@@ -1903,6 +1931,7 @@ gbp_gdb_debugger_list_locals_cb (GObject      *object,
               G_GNUC_UNUSED const gchar *value = NULL;
               const gchar *type = NULL;
               const gchar *name = NULL;
+              gboolean is_arg = FALSE;
 
               for (titer = iter->variant.result; titer; titer = titer->next)
                 {
@@ -1914,10 +1943,12 @@ gbp_gdb_debugger_list_locals_cb (GObject      *object,
                         type = titer->variant.cstring;
                       else if (g_strcmp0 (titer->variable, "value") == 0)
                         value = titer->variant.cstring;
+                      else if (g_strcmp0 (titer->variable, "arg") == 0)
+                        is_arg |= g_strcmp0 (titer->variant.cstring, "1") == 0;
                     }
                 }
 
-              if (name == NULL)
+              if ((name == NULL) || (arguments != is_arg))
                 continue;
 
               var = ide_debugger_variable_new (name);
@@ -1933,10 +1964,18 @@ gbp_gdb_debugger_list_locals_cb (GObject      *object,
         }
     }
 
-  g_task_return_pointer (task, g_steal_pointer (&ar), (GDestroyNotify)g_ptr_array_unref);
+  ide_task_return_pointer (task, g_steal_pointer (&ar), g_ptr_array_unref);
 
 cleanup:
   g_clear_pointer (&output, gdbwire_mi_output_free);
+}
+
+static void
+gbp_gdb_debugger_list_locals_cb (GObject      *object,
+                                 GAsyncResult *result,
+                                 gpointer      user_data)
+{
+  gbp_gdb_debugger_handle_list_variables (object, result, user_data, FALSE);
 }
 
 static void
@@ -1948,8 +1987,9 @@ gbp_gdb_debugger_list_locals_async (IdeDebugger         *debugger,
                                     gpointer             user_data)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)debugger;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autofree gchar *command = NULL;
+  const gchar *tid = NULL;
   guint depth;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
@@ -1957,18 +1997,16 @@ gbp_gdb_debugger_list_locals_async (IdeDebugger         *debugger,
   g_assert (IDE_IS_DEBUGGER_FRAME (frame));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_priority (task, G_PRIORITY_LOW);
-  g_task_set_source_tag (task, gbp_gdb_debugger_list_locals_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
+  ide_task_set_source_tag (task, gbp_gdb_debugger_list_locals_async);
 
+  tid = ide_debugger_thread_get_id (thread);
   depth = ide_debugger_frame_get_depth (frame);
-  command = g_strdup_printf ("9999-stack-select-frame %u\n"
-                             "@@@@-stack-list-locals --simple-values\n"
-                             "9999-stack-select-frame",
-                             depth);
+  command = g_strdup_printf ("-stack-list-variables --thread %s --frame %u --simple-values",
+                             tid, depth);
 
   gbp_gdb_debugger_exec_async (self,
-                               thread,
                                command,
                                cancellable,
                                gbp_gdb_debugger_list_locals_cb,
@@ -1980,10 +2018,14 @@ gbp_gdb_debugger_list_locals_finish (IdeDebugger   *debugger,
                                      GAsyncResult  *result,
                                      GError       **error)
 {
-  g_assert (GBP_IS_GDB_DEBUGGER (debugger));
-  g_assert (G_IS_TASK (result));
+  GPtrArray *ret;
 
-  return g_task_propagate_pointer (G_TASK (result), error);
+  g_assert (GBP_IS_GDB_DEBUGGER (debugger));
+  g_assert (IDE_IS_TASK (result));
+
+  ret = ide_task_propagate_pointer (IDE_TASK (result), error);
+
+  return IDE_PTR_ARRAY_STEAL_FULL (&ret);
 }
 
 static void
@@ -1991,80 +2033,7 @@ gbp_gdb_debugger_list_params_cb (GObject      *object,
                                  GAsyncResult *result,
                                  gpointer      user_data)
 {
-  GbpGdbDebugger *self = (GbpGdbDebugger *)object;
-  g_autoptr(GTask) task = user_data;
-  g_autoptr(GPtrArray) ar = NULL;
-  g_autoptr(GError) error = NULL;
-  struct gdbwire_mi_output *output;
-  struct gdbwire_mi_result *res;
-
-  g_assert (GBP_IS_GDB_DEBUGGER (self));
-  g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
-
-  output = gbp_gdb_debugger_exec_finish (self, result, &error);
-
-  if (output == NULL || gbp_gdb_debugger_unwrap (output, &error))
-    {
-      g_task_return_error (task, g_steal_pointer (&error));
-      goto cleanup;
-    }
-
-  ar = g_ptr_array_new_with_free_func (g_object_unref);
-
-  res = output->variant.result_record->result;
-
-  if (res->kind == GDBWIRE_MI_LIST &&
-      g_strcmp0 (res->variable, "stack-args") == 0 &&
-      res->variant.result->kind == GDBWIRE_MI_TUPLE &&
-      g_strcmp0 (res->variant.result->variable, "frame") == 0)
-    {
-      const struct gdbwire_mi_result *titer;
-
-      for (titer = res->variant.result->variant.result; titer; titer = titer->next)
-        {
-          if (titer->kind == GDBWIRE_MI_LIST && g_strcmp0 (titer->variable, "args") == 0)
-            {
-              const struct gdbwire_mi_result *args;
-
-              for (args = titer->variant.result; args; args = args->next)
-                {
-                  if (args->kind == GDBWIRE_MI_TUPLE)
-                    {
-                      g_autoptr(IdeDebuggerVariable) var = NULL;
-                      const struct gdbwire_mi_result *arginfo;
-                      const gchar *name = NULL;
-                      const gchar *type = NULL;
-                      const gchar *value = NULL;
-
-                      for (arginfo = args->variant.result; arginfo; arginfo = arginfo->next)
-                        {
-                          if (arginfo->kind == GDBWIRE_MI_CSTRING)
-                            {
-                              if (g_strcmp0 (arginfo->variable, "name") == 0)
-                                name = arginfo->variant.cstring;
-                              else if (g_strcmp0 (arginfo->variable, "type") == 0)
-                                type = arginfo->variant.cstring;
-                              else if (g_strcmp0 (arginfo->variable, "value") == 0)
-                                value = arginfo->variant.cstring;
-                            }
-                        }
-
-                      var = ide_debugger_variable_new (name);
-                      ide_debugger_variable_set_type_name (var, type);
-                      ide_debugger_variable_set_value (var, value);
-
-                      g_ptr_array_add (ar, g_steal_pointer (&var));
-                    }
-                }
-            }
-        }
-    }
-
-  g_task_return_pointer (task, g_steal_pointer (&ar), (GDestroyNotify)g_ptr_array_unref);
-
-cleanup:
-  g_clear_pointer (&output, gdbwire_mi_output_free);
+  gbp_gdb_debugger_handle_list_variables (object, result, user_data, TRUE);
 }
 
 static void
@@ -2076,24 +2045,26 @@ gbp_gdb_debugger_list_params_async (IdeDebugger         *debugger,
                                     gpointer             user_data)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)debugger;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autofree gchar *command = NULL;
   guint depth;
+  const gchar *tid = NULL;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (IDE_IS_DEBUGGER_THREAD (thread));
   g_assert (IDE_IS_DEBUGGER_FRAME (frame));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_priority (task, G_PRIORITY_LOW);
-  g_task_set_source_tag (task, gbp_gdb_debugger_list_params_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
+  ide_task_set_source_tag (task, gbp_gdb_debugger_list_params_async);
 
+  tid = ide_debugger_thread_get_id (thread);
   depth = ide_debugger_frame_get_depth (frame);
-  command = g_strdup_printf ("-stack-list-arguments --simple-values %u %u", depth, depth);
+  command = g_strdup_printf ("-stack-list-variables --thread %s --frame %u --simple-values",
+                             tid, depth);
 
   gbp_gdb_debugger_exec_async (self,
-                               thread,
                                command,
                                cancellable,
                                gbp_gdb_debugger_list_params_cb,
@@ -2105,10 +2076,14 @@ gbp_gdb_debugger_list_params_finish (IdeDebugger   *debugger,
                                      GAsyncResult  *result,
                                      GError       **error)
 {
-  g_assert (GBP_IS_GDB_DEBUGGER (debugger));
-  g_assert (G_IS_TASK (result));
+  GPtrArray *ret;
 
-  return g_task_propagate_pointer (G_TASK (result), error);
+  g_assert (GBP_IS_GDB_DEBUGGER (debugger));
+  g_assert (IDE_IS_TASK (result));
+
+  ret = ide_task_propagate_pointer (IDE_TASK (result), error);
+
+  return IDE_PTR_ARRAY_STEAL_FULL (&ret);
 }
 
 static void
@@ -2119,19 +2094,19 @@ gbp_gdb_debugger_list_registers_cb (GObject      *object,
   GbpGdbDebugger *self = (GbpGdbDebugger *)object;
   g_autoptr(GPtrArray) ar = NULL;
   g_autoptr(GError) error = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   struct gdbwire_mi_output *output;
   struct gdbwire_mi_result *res;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   output = gbp_gdb_debugger_exec_finish (self, result, &error);
 
   if (output == NULL || gbp_gdb_debugger_unwrap (output, &error))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       goto cleanup;
     }
 
@@ -2177,7 +2152,7 @@ gbp_gdb_debugger_list_registers_cb (GObject      *object,
         }
     }
 
-  g_task_return_pointer (task, g_steal_pointer (&ar), (GDestroyNotify)g_ptr_array_unref);
+  ide_task_return_pointer (task, g_steal_pointer (&ar), g_ptr_array_unref);
 
 cleanup:
   g_clear_pointer (&output, gdbwire_mi_output_free);
@@ -2190,17 +2165,16 @@ gbp_gdb_debugger_list_registers_async (IdeDebugger         *debugger,
                                        gpointer             user_data)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)debugger;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_priority (task, G_PRIORITY_LOW);
-  g_task_set_source_tag (task, gbp_gdb_debugger_list_registers_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
+  ide_task_set_source_tag (task, gbp_gdb_debugger_list_registers_async);
 
   gbp_gdb_debugger_exec_async (self,
-                               NULL,
                                "-data-list-register-values x",
                                cancellable,
                                gbp_gdb_debugger_list_registers_cb,
@@ -2212,10 +2186,14 @@ gbp_gdb_debugger_list_registers_finish (IdeDebugger   *debugger,
                                         GAsyncResult  *result,
                                         GError       **error)
 {
-  g_assert (GBP_IS_GDB_DEBUGGER (debugger));
-  g_assert (G_IS_TASK (result));
+  GPtrArray *ret;
 
-  return g_task_propagate_pointer (G_TASK (result), error);
+  g_assert (GBP_IS_GDB_DEBUGGER (debugger));
+  g_assert (IDE_IS_TASK (result));
+
+  ret = ide_task_propagate_pointer (IDE_TASK (result), error);
+
+  return IDE_PTR_ARRAY_STEAL_FULL (&ret);
 }
 
 static void
@@ -2224,20 +2202,20 @@ gbp_gdb_debugger_disassemble_cb (GObject      *object,
                                  gpointer      user_data)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)object;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
   g_autoptr(GPtrArray) ar = NULL;
   struct gdbwire_mi_output *output;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_TASK (result));
 
   output = gbp_gdb_debugger_exec_finish (self, result, &error);
 
   if (output == NULL || gbp_gdb_debugger_unwrap (output, &error))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       goto cleanup;
     }
 
@@ -2285,7 +2263,7 @@ gbp_gdb_debugger_disassemble_cb (GObject      *object,
         }
     }
 
-  g_task_return_pointer (task, g_steal_pointer (&ar), (GDestroyNotify)g_ptr_array_unref);
+  ide_task_return_pointer (task, g_steal_pointer (&ar), g_ptr_array_unref);
 
 cleanup:
   g_clear_pointer (&output, gdbwire_mi_output_free);
@@ -2299,16 +2277,16 @@ gbp_gdb_debugger_disassemble_async (IdeDebugger                   *debugger,
                                     gpointer                       user_data)
 {
   GbpGdbDebugger *self = (GbpGdbDebugger *)debugger;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autofree gchar *command = NULL;
 
   g_assert (GBP_IS_GDB_DEBUGGER (self));
   g_assert (range != NULL);
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_priority (task, G_PRIORITY_LOW);
-  g_task_set_source_tag (task, gbp_gdb_debugger_disassemble_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
+  ide_task_set_source_tag (task, gbp_gdb_debugger_disassemble_async);
 
   command = g_strdup_printf ("-data-disassemble "
                              "-s 0x%"G_GINT64_MODIFIER"x "
@@ -2316,7 +2294,6 @@ gbp_gdb_debugger_disassemble_async (IdeDebugger                   *debugger,
                              range->from, range->to);
 
   gbp_gdb_debugger_exec_async (self,
-                               NULL,
                                command,
                                cancellable,
                                gbp_gdb_debugger_disassemble_cb,
@@ -2328,10 +2305,14 @@ gbp_gdb_debugger_disassemble_finish (IdeDebugger   *debugger,
                                      GAsyncResult  *result,
                                      GError       **error)
 {
-  g_assert (GBP_IS_GDB_DEBUGGER (debugger));
-  g_assert (G_IS_TASK (result));
+  GPtrArray *ret;
 
-  return g_task_propagate_pointer (G_TASK (result), error);
+  g_assert (GBP_IS_GDB_DEBUGGER (debugger));
+  g_assert (IDE_IS_TASK (result));
+
+  ret = ide_task_propagate_pointer (IDE_TASK (result), error);
+
+  return IDE_PTR_ARRAY_STEAL_FULL (&ret);
 }
 
 static gboolean
@@ -2362,9 +2343,9 @@ static void
 gbp_gdb_debugger_prepare (IdeDebugger *debugger,
                           IdeRunner   *runner)
 {
-  static gchar *prepend_argv[] = { "gdb", "--interpreter=mi2", "--args" };
+  static const gchar *prepend_argv[] = { "gdb", "--interpreter=mi2", "--args" };
   GbpGdbDebugger *self = (GbpGdbDebugger *)debugger;
-  int tty_fd;
+  VtePty *pty;
 
   IDE_ENTRY;
 
@@ -2379,15 +2360,24 @@ gbp_gdb_debugger_prepare (IdeDebugger *debugger,
   dzl_signal_group_set_target (self->runner_signals, runner);
 
   /*
-   * We steal and remap the PTY fd into the process so that gdb does not get
-   * the controlling terminal, but instead allow us to ask gdb to setup the
-   * inferior with that same PTY.
+   * If there is a PTY device to display the contents of the inferior, then
+   * we will create a new FD for that from the PTY and save it to map into
+   * the inferior.
    */
-  if (-1 != (tty_fd = ide_runner_steal_tty (runner)))
-    self->mapped_fd = ide_runner_take_fd (runner, tty_fd, -1);
+  if ((pty = ide_runner_get_pty (runner)))
+    {
+      int master_fd = vte_pty_get_fd (pty);
+      int tty_fd = ide_pty_intercept_create_slave (master_fd, TRUE);
+
+      if (tty_fd != -1)
+        {
+          self->mapped_fd = ide_runner_take_fd (runner, tty_fd, -1);
+          ide_runner_set_disable_pty (runner, TRUE);
+        }
+    }
 
   /* We need access to stdin/stdout for communicating with gdb */
-  ide_runner_set_flags (runner, G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE);
+  ide_runner_set_flags (runner, G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE);
 
   IDE_EXIT;
 }
@@ -2415,7 +2405,7 @@ gbp_gdb_debugger_on_runner_spawned (GbpGdbDebugger *self,
 
   /* Ask gdb to use our mapped in FD for the TTY when spawning the child */
   tty_command = g_strdup_printf ("-gdb-set inferior-tty /proc/self/fd/%d", self->mapped_fd);
-  gbp_gdb_debugger_exec_async (self, NULL, tty_command, NULL, NULL, NULL);
+  gbp_gdb_debugger_exec_async (self, tty_command, NULL, NULL, NULL);
 
   ide_debugger_move_async (IDE_DEBUGGER (self),
                            IDE_DEBUGGER_MOVEMENT_START,
@@ -2440,12 +2430,12 @@ gbp_gdb_debugger_dispose (GObject *object)
 
   for (const GList *iter = list; iter != NULL; iter = iter->next)
     {
-      g_autoptr(GTask) task = iter->data;
+      g_autoptr(IdeTask) task = iter->data;
 
-      g_task_return_new_error (task,
-                               G_IO_ERROR,
-                               G_IO_ERROR_CANCELLED,
-                               "The task was canceled");
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_CANCELLED,
+                                 "The task was canceled");
     }
 
   if (!g_cancellable_is_cancelled (self->read_cancellable))
@@ -2491,7 +2481,7 @@ gbp_gdb_debugger_class_init (GbpGdbDebuggerClass *klass)
   object_class->dispose = gbp_gdb_debugger_dispose;
   object_class->finalize = gbp_gdb_debugger_finalize;
 
-  ide_object_class->set_context = gbp_gdb_debugger_set_context;
+  ide_object_class->parent_set = gbp_gdb_debugger_parent_set;
 
   debugger_class->supports_runner = gbp_gdb_debugger_supports_runner;
   debugger_class->prepare = gbp_gdb_debugger_prepare;
@@ -2531,6 +2521,7 @@ gbp_gdb_debugger_init (GbpGdbDebugger *self)
   self->parser = gdbwire_mi_parser_create (callbacks);
   self->read_cancellable = g_cancellable_new ();
   self->read_buffer = g_malloc (READ_BUFFER_LEN);
+  self->mapped_fd = -1;
 
   g_queue_init (&self->cmdqueue);
 
@@ -2578,7 +2569,7 @@ gbp_gdb_debugger_read_cb (GObject      *object,
 
   if (n_read <= 0)
     {
-      g_debug ("empty read from peer, possibly closed?");
+      g_message ("empty read from peer, possibly closed?");
       return;
     }
 
@@ -2614,7 +2605,6 @@ gbp_gdb_debugger_connect (GbpGdbDebugger *self,
                           GIOStream      *io_stream,
                           GCancellable   *cancellable)
 {
-  g_autoptr(GError) error = NULL;
   GInputStream *stream;
 
   g_return_if_fail (GBP_IS_GDB_DEBUGGER (self));
@@ -2640,7 +2630,7 @@ gbp_gdb_debugger_connect (GbpGdbDebugger *self,
                              gbp_gdb_debugger_read_cb,
                              g_object_ref (self));
 
-  gbp_gdb_debugger_exec_async (self, NULL, "-gdb-set mi-async on", NULL, NULL, NULL);
+  gbp_gdb_debugger_exec_async (self, "-gdb-set mi-async on", NULL, NULL, NULL);
   gbp_gdb_debugger_reload_breakpoints (self);
 }
 
@@ -2711,7 +2701,6 @@ gbp_gdb_debugger_write_cb (GObject      *object,
 /**
  * gbp_gdb_debugger_exec_async:
  * @self: An #GbpGdbDebugger
- * @thread: (nullable): An #IdeDebuggerThread or %NULL
  * @command: the command to be executed
  * @cancellable: (nullable): a #GCancellable or %NULL
  * @user_data: user data for @cancellable
@@ -2725,42 +2714,39 @@ gbp_gdb_debugger_write_cb (GObject      *object,
  * from the debugger with the result, or the connection has closed. Whichever
  * is first.
  *
- * Since: 3.26
+ * Since: 3.32
  */
 void
 gbp_gdb_debugger_exec_async (GbpGdbDebugger      *self,
-                             IdeDebuggerThread   *thread,
                              const gchar         *command,
                              GCancellable        *cancellable,
                              GAsyncReadyCallback  callback,
                              gpointer             user_data)
 {
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autoptr(GError) error = NULL;
   g_autoptr(GBytes) bytes = NULL;
-  IdeDebuggerThread *selected;
   GOutputStream *stream;
   GString *str;
   guint id;
 
   g_return_if_fail (GBP_IS_GDB_DEBUGGER (self));
   g_return_if_fail (command != NULL);
-  g_return_if_fail (!thread || IDE_IS_DEBUGGER_THREAD (thread));
   g_return_if_fail (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  /* Wrap at 10,000, but steal 9999 to use for thread switching */
+  /* Wrap at 10,000 */
   id = ++self->cmdseq;
-  if (id == 9999)
+  if (id == 10000)
     id = self->cmdseq = 1;
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_priority (task, G_PRIORITY_LOW);
-  g_task_set_source_tag (task, gbp_gdb_debugger_exec_async);
-  g_task_set_task_data (task, g_strdup_printf ("%03u", id), g_free);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
+  ide_task_set_source_tag (task, gbp_gdb_debugger_exec_async);
+  ide_task_set_task_data (task, g_strdup_printf ("%03u", id), g_free);
 
   if (!gbp_gdb_debugger_check_ready (self, &error))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
@@ -2770,20 +2756,6 @@ gbp_gdb_debugger_exec_async (GbpGdbDebugger      *self,
   stream = g_io_stream_get_output_stream (self->io_stream);
 
   str = g_string_new (NULL);
-
-  selected = ide_debugger_get_selected_thread (IDE_DEBUGGER (self));
-
-  /* We might need to switch threads before we execute the command. */
-  if (thread != NULL)
-    {
-      if (selected == NULL || ide_debugger_thread_compare (selected, thread) != 0)
-        {
-          const gchar *tid = ide_debugger_thread_get_id (thread);
-
-          /* We ignore 9999 commands */
-          g_string_append_printf (str, "9999-thread-select %s\n", tid);
-        }
-    }
 
   if (command[0] == '-' || strstr (command, "@@@@") != NULL)
     {
@@ -2813,12 +2785,10 @@ gbp_gdb_debugger_exec_async (GbpGdbDebugger      *self,
        * synthesize a NULL response.
        */
       g_string_append_printf (str, "%s\n", command);
-      g_task_return_pointer (task, NULL, NULL);
+      (ide_task_return_pointer) (task, NULL, NULL);
     }
 
-#if 0
-  g_print (">>> %s", str->str);
-#endif
+  DEBUG_LOG ("to-gdb", str->str);
 
   bytes = g_string_free_to_bytes (str);
   g_object_set_data_full (G_OBJECT (task), "REQUEST_BYTES",
@@ -2845,14 +2815,20 @@ gbp_gdb_debugger_exec_async (GbpGdbDebugger      *self,
  *
  * Returns: a gdbwire_mi_output which should be freed with
  *   gdbwire_mi_output_free() when no longer in use.
+ *
+ * Since: 3.32
  */
 struct gdbwire_mi_output *
 gbp_gdb_debugger_exec_finish (GbpGdbDebugger  *self,
                               GAsyncResult    *result,
                               GError         **error)
 {
-  g_return_val_if_fail (GBP_IS_GDB_DEBUGGER (self), NULL);
-  g_return_val_if_fail (G_IS_TASK (result), NULL);
+  struct gdbwire_mi_output *ret;
 
-  return g_task_propagate_pointer (G_TASK (result), error);
+  g_return_val_if_fail (GBP_IS_GDB_DEBUGGER (self), NULL);
+  g_return_val_if_fail (IDE_IS_TASK (result), NULL);
+
+  ret = ide_task_propagate_pointer (IDE_TASK (result), error);
+
+  return g_steal_pointer (&ret);
 }

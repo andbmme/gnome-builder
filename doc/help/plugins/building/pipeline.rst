@@ -5,7 +5,7 @@ Extending the Build Pipeline
 Builder uses the concept of a "Build Pipeline" to build a project. The build
 pipeline consistes of multiple "phases" and build "stages" run in a given phase.
 
-For example, in the ``Ide.BuildPhase.DOWNLAODS`` phase, you might have a stage
+For example, in the ``Ide.PipelinePhase.DOWNLOADS`` phase, you might have a stage
 that downloads and installs the dependencies for your project. The Flatpak
 extension does this when building Flatpak-based project configurations.
 
@@ -15,21 +15,21 @@ executed in exactly this sequence up to the requested phase.
 Build Phases
 ============
 
-  - ``Ide.BuildPhase.PREPARE`` is the first phase of the build pipeline. Use this to create necessary directories and other preparation steps.
-  - ``Ide.BuildPhase.DOWNLOADS`` should be used to download and cache any build artifacts that are needed during the build.
-  - ``Ide.BuildPhase.DEPENDENCIES`` should build any dependencies that are needed to successfully build the project.
-  - ``Ide.BuildPhase.AUTOGEN`` should generate any necessary project files. Contrast this with the ``Ide.BuildPhase.CONFIGURE`` phase which runs the configuration scripts.
-  - ``Ide.BuildPhase.CONFIGURE`` should run configuration scripts such as ``./configure``, ``meson``, or ``cmake``.
-  - ``Ide.BuildPhase.BUILD`` should perform the incremental build process such as ``make`` or ``ninja``.
-  - ``Ide.BuildPhase.INSTALL`` should install the project to the configured prefix.
-  - ``Ide.BuildPhase.EXPORT`` should be used to attach export hooks such as buliding a Flatpak bundle, Debian, or RPM package.
+  - ``Ide.PipelinePhase.PREPARE`` is the first phase of the build pipeline. Use this to create necessary directories and other preparation steps.
+  - ``Ide.PipelinePhase.DOWNLOADS`` should be used to download and cache any build artifacts that are needed during the build.
+  - ``Ide.PipelinePhase.DEPENDENCIES`` should build any dependencies that are needed to successfully build the project.
+  - ``Ide.PipelinePhase.AUTOGEN`` should generate any necessary project files. Contrast this with the ``Ide.PipelinePhase.CONFIGURE`` phase which runs the configuration scripts.
+  - ``Ide.PipelinePhase.CONFIGURE`` should run configuration scripts such as ``./configure``, ``meson``, or ``cmake``.
+  - ``Ide.PipelinePhase.BUILD`` should perform the incremental build process such as ``make`` or ``ninja``.
+  - ``Ide.PipelinePhase.INSTALL`` should install the project to the configured prefix.
+  - ``Ide.PipelinePhase.EXPORT`` should be used to attach export hooks such as building a Flatpak bundle, Debian, or RPM package.
 
 Additionally, there are phases which have special meaning.
 
-  - ``Ide.BuildPhase.BEFORE`` can be XOR'd with any previous phase to indicate it should run as part of the phase, but before the phase has started.
-  - ``Ide.BuildPhase.AFTER`` can be XOR'd with any previous phase to indicate it should run as part of the phase, but after the phase has completed.
-  - ``Ide.BuildPhase.FINISHED`` indicates that a previous build request has finished.
-  - ``Ide.BuildPhase.FAILED`` indicates that a previous build request has failed.
+  - ``Ide.PipelinePhase.BEFORE`` can be XOR'd with any previous phase to indicate it should run as part of the phase, but before the phase has started.
+  - ``Ide.PipelinePhase.AFTER`` can be XOR'd with any previous phase to indicate it should run as part of the phase, but after the phase has completed.
+  - ``Ide.PipelinePhase.FINISHED`` indicates that a previous build request has finished.
+  - ``Ide.PipelinePhase.FAILED`` indicates that a previous build request has failed.
 
 Creating a Build Stage
 ======================
@@ -46,7 +46,7 @@ loads we will register our stage in the appropriate phase.
    from gi.repository import GObject
    from gi.repository import Ide
 
-   class MyBuildStage(Ide.Object, Ide.BuildStage):
+   class MyPipelineStage(Ide.Object, Ide.PipelineStage):
 
        def do_execute(self, pipeline, cancellable):
            """
@@ -100,16 +100,14 @@ loads we will register our stage in the appropriate phase.
            """
            return False
 
-   class MyPipelineAddin(GObject.Object, Ide.BuildPipelineAddin):
+   class MyPipelineAddin(GObject.Object, Ide.PipelineAddin):
 
        def do_load(self, pipeline):
-           stage = MyBuildStage()
-           phase = Ide.BuildPhase.BUILD | Ide.BuildPhase.AFTER
-           stage_id = pipeline.connect(phase, 100, stage)
+           stage = MyPipelineStage()
+           phase = Ide.PipelinePhase.BUILD | Ide.PipelinePhase.AFTER
+           stage_id = pipeline.attach(phase, 100, stage)
 
            # track() can be used to auto-unregister the phase when
            # the pipeline is removed.
            self.track(stage_id)
 
-.. note:: connect() was an unfortunate API choice and will likely be changed in
-          a future release to avoid collisions with signals.

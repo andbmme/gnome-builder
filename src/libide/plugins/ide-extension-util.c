@@ -1,6 +1,6 @@
 /* ide-extension-util.c
  *
- * Copyright © 2015 Christian Hergert <christian@hergert.me>
+ * Copyright 2015-2019 Christian Hergert <christian@hergert.me>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,15 +14,19 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "ide-extension-util"
 
-#include <glib-object.h>
+#include "config.h"
+
+#include <libide-core.h>
 #include <gobject/gvaluecollector.h>
 #include <stdlib.h>
 
-#include "plugins/ide-extension-util.h"
+#include "ide-extension-util-private.h"
 
 gboolean
 ide_extension_util_can_use_plugin (PeasEngine     *engine,
@@ -36,7 +40,8 @@ ide_extension_util_can_use_plugin (PeasEngine     *engine,
   g_autoptr(GSettings) settings = NULL;
 
   g_return_val_if_fail (plugin_info != NULL, FALSE);
-  g_return_val_if_fail (g_type_is_a (interface_type, G_TYPE_INTERFACE), FALSE);
+  g_return_val_if_fail (g_type_is_a (interface_type, G_TYPE_INTERFACE) ||
+                        g_type_is_a (interface_type, G_TYPE_OBJECT), FALSE);
   g_return_val_if_fail (priority != NULL, FALSE);
 
   *priority = 0;
@@ -46,7 +51,18 @@ ide_extension_util_can_use_plugin (PeasEngine     *engine,
    * information to do so.
    */
   if ((key != NULL) && (value == NULL))
-    return FALSE;
+    {
+      const gchar *found;
+
+      /* If the plugin has the key and its empty, or doesn't have the key,
+       * then we can assume it wants the equivalent of "*".
+       */
+      found = peas_plugin_info_get_external_data (plugin_info, key);
+      if (ide_str_empty0 (found))
+        return TRUE;
+
+      return FALSE;
+    }
 
   /*
    * If the plugin isn't loaded, then we shouldn't use it.
@@ -67,12 +83,15 @@ ide_extension_util_can_use_plugin (PeasEngine     *engine,
   if (key != NULL)
     {
       g_autofree gchar *priority_name = NULL;
+      g_autofree gchar *delimit = NULL;
       g_auto(GStrv) values_array = NULL;
       const gchar *values;
       const gchar *priority_value;
 
       values = peas_plugin_info_get_external_data (plugin_info, key);
-      values_array = g_strsplit (values ? values : "", ",", 0);
+      /* Canonicalize input (for both , and ;) */
+      delimit = g_strdelimit (g_strdup (values ? values : ""), ";,", ';');
+      values_array = g_strsplit (delimit, ";", 0);
 
       /* An empty value implies "*" to match anything */
       if (!values || g_strv_contains ((const gchar * const *)values_array, "*"))
@@ -104,8 +123,10 @@ ide_extension_util_can_use_plugin (PeasEngine     *engine,
 static void
 clear_param (gpointer data)
 {
+G_GNUC_BEGIN_IGNORE_DEPRECATIONS
   GParameter *p = data;
   g_value_unset (&p->value);
+G_GNUC_END_IGNORE_DEPRECATIONS
 }
 
 static GType
@@ -132,8 +153,8 @@ find_property_type (GType        type,
   for (guint i = 0; i < types->len; i++)
     {
       GType prereq_type = g_array_index (types, GType, i);
-      GObjectClass *klass = NULL;
-      GTypeInterface *iface = NULL;
+      GObjectClass *klass, *unref_class = NULL;
+      GTypeInterface *iface, *unref_iface = NULL;
       GParamSpec *pspec = NULL;
       GType ret = G_TYPE_INVALID;
 
@@ -145,12 +166,14 @@ find_property_type (GType        type,
 
       if (G_TYPE_IS_OBJECT (prereq_type))
         {
-          klass = g_type_class_ref (prereq_type);
+          if (!(klass = g_type_class_peek (prereq_type)))
+            klass = unref_class = g_type_class_ref (prereq_type);
           pspec = g_object_class_find_property (klass, name);
         }
       else if (G_TYPE_IS_INTERFACE (prereq_type))
         {
-          iface = g_type_default_interface_ref (prereq_type);
+          if (!(iface = g_type_default_interface_peek (prereq_type)))
+            iface = unref_iface = g_type_default_interface_ref (prereq_type);
           pspec = g_object_interface_find_property (iface, name);
         }
       else
@@ -159,8 +182,8 @@ find_property_type (GType        type,
       if (pspec != NULL)
         ret = pspec->value_type;
 
-      g_clear_pointer (&klass, g_type_class_unref);
-      g_clear_pointer (&iface, g_type_default_interface_unref);
+      g_clear_pointer (&unref_class, g_type_class_unref);
+      g_clear_pointer (&unref_iface, g_type_default_interface_unref);
 
       if (ret != G_TYPE_INVALID)
         return ret;
@@ -176,6 +199,8 @@ collect_parameters (GType        type,
 {
   const gchar *property = first_property;
   g_autoptr(GArray) params = NULL;
+
+G_GNUC_BEGIN_IGNORE_DEPRECATIONS
 
   params = g_array_new (FALSE, FALSE, sizeof (GParameter));
   g_array_set_clear_func (params, clear_param);
@@ -208,6 +233,8 @@ collect_parameters (GType        type,
   if (property != NULL)
     return NULL;
 
+G_GNUC_END_IGNORE_DEPRECATIONS
+
   return g_steal_pointer (&params);
 }
 
@@ -221,6 +248,8 @@ collect_parameters (GType        type,
  * but looking at base-classes in addition to interface properties.
  *
  * Returns: (transfer full): a #PeasExtensionSet.
+ *
+ * Since: 3.32
  */
 PeasExtensionSet *
 ide_extension_set_new (PeasEngine     *engine,
@@ -249,7 +278,7 @@ ide_extension_new (PeasEngine     *engine,
   va_list args;
 
   g_return_val_if_fail (!engine || PEAS_IS_ENGINE (engine), NULL);
-  g_return_val_if_fail (G_TYPE_IS_INTERFACE (type), NULL);
+  g_return_val_if_fail (G_TYPE_IS_INTERFACE (type) || G_TYPE_IS_OBJECT (type), NULL);
 
   if (engine == NULL)
     engine = peas_engine_get_default ();
@@ -261,9 +290,13 @@ ide_extension_new (PeasEngine     *engine,
   if (params == NULL)
     return NULL;
 
+G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+
   return peas_engine_create_extensionv (engine,
                                         plugin_info,
                                         type,
                                         params->len,
-                                        (GParameter *)params->data);
+                                        (GParameter *)(gpointer)params->data);
+
+G_GNUC_END_IGNORE_DEPRECATIONS
 }

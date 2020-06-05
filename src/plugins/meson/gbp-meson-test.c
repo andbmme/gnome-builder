@@ -1,6 +1,6 @@
 /* gbp-meson-test.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gbp-meson-test"
@@ -22,17 +24,17 @@
 
 struct _GbpMesonTest
 {
-  IdeTest          parent_instance;
-  IdeEnvironment  *env;
-  gchar          **command;
-  GFile           *workdir;
-  guint            timeout;
+  IdeTest     parent_instance;
+  gchar     **environ;
+  gchar     **command;
+  GFile      *workdir;
+  guint       timeout;
 };
 
 enum {
   PROP_0,
   PROP_COMMAND,
-  PROP_ENV,
+  PROP_ENVIRON,
   PROP_TIMEOUT,
   PROP_WORKDIR,
   N_PROPS
@@ -48,7 +50,7 @@ gbp_meson_test_finalize (GObject *object)
   GbpMesonTest *self = (GbpMesonTest *)object;
 
   g_clear_pointer (&self->command, g_strfreev);
-  g_clear_object (&self->env);
+  g_clear_pointer (&self->environ, g_strfreev);
   g_clear_object (&self->workdir);
 
   G_OBJECT_CLASS (gbp_meson_test_parent_class)->finalize (object);
@@ -68,8 +70,8 @@ gbp_meson_test_get_property (GObject    *object,
       g_value_set_boxed (value, self->command);
       break;
 
-    case PROP_ENV:
-      g_value_set_object (value, self->env);
+    case PROP_ENVIRON:
+      g_value_set_boxed (value, self->environ);
       break;
 
     case PROP_TIMEOUT:
@@ -99,8 +101,8 @@ gbp_meson_test_set_property (GObject      *object,
       self->command = g_value_dup_boxed (value);
       break;
 
-    case PROP_ENV:
-      self->env = g_value_dup_object (value);
+    case PROP_ENVIRON:
+      self->environ = g_value_dup_boxed (value);
       break;
 
     case PROP_TIMEOUT:
@@ -132,12 +134,12 @@ gbp_meson_test_class_init (GbpMesonTestClass *klass)
                         G_TYPE_STRV,
                         (G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
 
-  properties [PROP_ENV] =
-    g_param_spec_object ("env",
-                         "Environment",
-                         "The environment for the test",
-                         IDE_TYPE_ENVIRONMENT,
-                         (G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+  properties [PROP_ENVIRON] =
+    g_param_spec_boxed ("environ",
+                        "Environment",
+                        "The environment for the test",
+                        G_TYPE_STRV,
+                        (G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
 
   properties [PROP_TIMEOUT] =
     g_param_spec_uint ("timeout",
@@ -187,10 +189,10 @@ gbp_meson_test_get_timeout (GbpMesonTest *self)
   return self->timeout;
 }
 
-IdeEnvironment *
-gbp_meson_test_get_env (GbpMesonTest *self)
+const gchar * const *
+gbp_meson_test_get_environ (GbpMesonTest *self)
 {
   g_return_val_if_fail (GBP_IS_MESON_TEST (self), NULL);
 
-  return self->env;
+  return (const gchar * const *)self->environ;
 }

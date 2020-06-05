@@ -1,6 +1,6 @@
 /* ide-xml-completion-attributes.c
  *
- * Copyright © 2017 Sebastien Lafargue <slafargue@gnome.org>
+ * Copyright 2017 Sebastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,10 +14,13 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-#include "ide-xml-completion-attributes.h"
+#include <dazzle.h>
 
+#include "ide-xml-completion-attributes.h"
 #include "ide-xml-position.h"
 
 typedef struct _MatchingState
@@ -285,7 +288,7 @@ process_matching_state (MatchingState   *state,
 {
   IdeXmlRngDefine *old_define;
   IdeXmlRngDefineType type;
-  GPtrArray *match_children;
+  GPtrArray *match_children = NULL;
   gboolean old_optional;
 
   g_assert (state != NULL);

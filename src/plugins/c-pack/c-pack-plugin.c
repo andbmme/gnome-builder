@@ -1,6 +1,6 @@
 /* c-pack-plugin.c
  *
- * Copyright © 2015 Christian Hergert <christian@hergert.me>
+ * Copyright 2015-2019 Christian Hergert <christian@hergert.me>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,22 +14,30 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#define G_LOG_DOMAIN "c-pack-plugin"
+
+#include <libide-editor.h>
+#include <libide-sourceview.h>
 #include <libpeas/peas.h>
 
 #include "ide-c-indenter.h"
-#include "ide-c-format-provider.h"
+#include "cpack-completion-provider.h"
+#include "cpack-editor-page-addin.h"
 
-void _ide_c_indenter_register_type (GTypeModule *module);
-void _ide_c_format_provider_register_type (GTypeModule *module);
-
-void
-ide_c_pack_register_types (PeasObjectModule *module)
+_IDE_EXTERN void
+_ide_c_pack_register_types (PeasObjectModule *module)
 {
-  _ide_c_indenter_register_type (G_TYPE_MODULE (module));
-  _ide_c_format_provider_register_type (G_TYPE_MODULE (module));
-
-  peas_object_module_register_extension_type (module, IDE_TYPE_INDENTER, IDE_TYPE_C_INDENTER);
-  peas_object_module_register_extension_type (module, IDE_TYPE_COMPLETION_PROVIDER, IDE_TYPE_C_FORMAT_PROVIDER);
+  peas_object_module_register_extension_type (module,
+                                              IDE_TYPE_INDENTER,
+                                              IDE_TYPE_C_INDENTER);
+  peas_object_module_register_extension_type (module,
+                                              IDE_TYPE_EDITOR_PAGE_ADDIN,
+                                              CPACK_TYPE_EDITOR_PAGE_ADDIN);
+  peas_object_module_register_extension_type (module,
+                                              IDE_TYPE_COMPLETION_PROVIDER,
+                                              CPACK_TYPE_COMPLETION_PROVIDER);
 }

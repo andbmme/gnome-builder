@@ -1,34 +1,40 @@
-if get_option('with_git')
+if get_option('plugin_git')
 
-git_resources = gnome.compile_resources(
+subdir('daemon')
+
+plugins_sources += files([
+  'daemon/line-cache.c',
+  'gbp-git-branch.c',
+  'gbp-git-buffer-addin.c',
+  'gbp-git-buffer-change-monitor.c',
+  'gbp-git-client.c',
+  'gbp-git-dependency-updater.c',
+  'gbp-git-pipeline-addin.c',
+  'gbp-git-progress.c',
+  'gbp-git-submodule-stage.c',
+  'gbp-git-tag.c',
+  'gbp-git-vcs-cloner.c',
+  'gbp-git-vcs-config.c',
+  'gbp-git-vcs-initializer.c',
+  'gbp-git-vcs.c',
+  'gbp-git-workbench-addin.c',
+  'git-plugin.c',
+])
+
+plugins_sources += [
+  ipc_git_change_monitor_src,
+  ipc_git_config_src,
+  ipc_git_progress_src,
+  ipc_git_repository_src,
+  ipc_git_service_src,
+]
+
+plugin_git_resources = gnome.compile_resources(
   'git-resources',
   'git.gresource.xml',
-  c_name: 'ide_git',
+  c_name: 'gbp_git',
 )
 
-git_sources = [
-  'ide-git-buffer-change-monitor.c',
-  'ide-git-buffer-change-monitor.h',
-  'ide-git-clone-widget.c',
-  'ide-git-clone-widget.h',
-  'ide-git-genesis-addin.c',
-  'ide-git-genesis-addin.h',
-  'ide-git-plugin.c',
-  'ide-git-remote-callbacks.c',
-  'ide-git-remote-callbacks.h',
-  'ide-git-vcs.c',
-  'ide-git-vcs.h',
-  'ide-git-vcs-config.c',
-  'ide-git-vcs-config.h',
-  'ide-git-vcs-initializer.c',
-  'ide-git-vcs-initializer.h',
-]
-
-gnome_builder_plugins_deps += [
-  libgit_dep,
-]
-
-gnome_builder_plugins_sources += files(git_sources)
-gnome_builder_plugins_sources += git_resources[0]
+plugins_sources += plugin_git_resources
 
 endif

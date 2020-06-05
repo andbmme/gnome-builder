@@ -1,6 +1,6 @@
 /* ide-autotools-autogen-stage.c
  *
- * Copyright © 2016 Christian Hergert <chergert@redhat.com>
+ * Copyright 2016-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "ide-autotools-autogen-stage"
@@ -22,12 +24,12 @@
 
 struct _IdeAutotoolsAutogenStage
 {
-  IdeBuildStage parent_instance;
+  IdePipelineStage parent_instance;
 
   gchar *srcdir;
 };
 
-G_DEFINE_TYPE (IdeAutotoolsAutogenStage, ide_autotools_autogen_stage, IDE_TYPE_BUILD_STAGE)
+G_DEFINE_TYPE (IdeAutotoolsAutogenStage, ide_autotools_autogen_stage, IDE_TYPE_PIPELINE_STAGE)
 
 enum {
   PROP_0,
@@ -43,45 +45,45 @@ ide_autotools_autogen_stage_wait_check_cb (GObject      *object,
                                            gpointer      user_data)
 {
   IdeSubprocess *subprocess = (IdeSubprocess *)object;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
 
   g_assert (IDE_IS_SUBPROCESS (subprocess));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   if (!ide_subprocess_wait_check_finish (subprocess, result, &error))
-    g_task_return_error (task, g_steal_pointer (&error));
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
-    g_task_return_boolean (task, TRUE);
+    ide_task_return_boolean (task, TRUE);
 }
 
 static void
-ide_autotools_autogen_stage_execute_async (IdeBuildStage       *stage,
-                                           IdeBuildPipeline    *pipeline,
-                                           GCancellable        *cancellable,
-                                           GAsyncReadyCallback  callback,
-                                           gpointer             user_data)
+ide_autotools_autogen_stage_build_async (IdePipelineStage    *stage,
+                                         IdePipeline         *pipeline,
+                                         GCancellable        *cancellable,
+                                         GAsyncReadyCallback  callback,
+                                         gpointer             user_data)
 {
   IdeAutotoolsAutogenStage *self = (IdeAutotoolsAutogenStage *)stage;
   g_autofree gchar *autogen_path = NULL;
   g_autoptr(IdeSubprocessLauncher) launcher = NULL;
   g_autoptr(IdeSubprocess) subprocess = NULL;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autoptr(GError) error = NULL;
 
   g_assert (IDE_IS_AUTOTOOLS_AUTOGEN_STAGE (self));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, ide_autotools_autogen_stage_execute_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, ide_autotools_autogen_stage_build_async);
 
   autogen_path = g_build_filename (self->srcdir, "autogen.sh", NULL);
 
-  launcher = ide_build_pipeline_create_launcher (pipeline, &error);
+  launcher = ide_pipeline_create_launcher (pipeline, &error);
 
   if (launcher == NULL)
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
@@ -102,11 +104,11 @@ ide_autotools_autogen_stage_execute_async (IdeBuildStage       *stage,
 
   if (subprocess == NULL)
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
-  ide_build_stage_log_subprocess (stage, subprocess);
+  ide_pipeline_stage_log_subprocess (stage, subprocess);
 
   ide_subprocess_wait_check_async (subprocess,
                                    cancellable,
@@ -115,14 +117,14 @@ ide_autotools_autogen_stage_execute_async (IdeBuildStage       *stage,
 }
 
 static gboolean
-ide_autotools_autogen_stage_execute_finish (IdeBuildStage  *stage,
-                                            GAsyncResult   *result,
-                                            GError        **error)
+ide_autotools_autogen_stage_build_finish (IdePipelineStage  *stage,
+                                          GAsyncResult      *result,
+                                          GError           **error)
 {
   g_assert (IDE_IS_AUTOTOOLS_AUTOGEN_STAGE (stage));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_TASK (result));
 
-  return g_task_propagate_boolean (G_TASK (result), error);
+  return ide_task_propagate_boolean (IDE_TASK (result), error);
 }
 
 static void
@@ -158,18 +160,18 @@ static void
 ide_autotools_autogen_stage_class_init (IdeAutotoolsAutogenStageClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
-  IdeBuildStageClass *stage_class = IDE_BUILD_STAGE_CLASS (klass);
+  IdePipelineStageClass *stage_class = IDE_PIPELINE_STAGE_CLASS (klass);
 
   object_class->finalize = ide_autotools_autogen_stage_finalize;
   object_class->set_property = ide_autotools_autogen_stage_set_property;
 
-  stage_class->execute_async = ide_autotools_autogen_stage_execute_async;
-  stage_class->execute_finish = ide_autotools_autogen_stage_execute_finish;
+  stage_class->build_async = ide_autotools_autogen_stage_build_async;
+  stage_class->build_finish = ide_autotools_autogen_stage_build_finish;
 
   properties [PROP_SRCDIR] =
     g_param_spec_string ("srcdir", NULL, NULL, NULL,
                          G_PARAM_WRITABLE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
-  
+
   g_object_class_install_properties (object_class, N_PROPS, properties);
 }
 

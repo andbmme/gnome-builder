@@ -1,6 +1,6 @@
 /* gstyle-color-panel.c
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,11 +14,15 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gstyle-color-panel"
 
 #include <glib/gi18n.h>
+
+#include "gstyle-resources.h"
 
 #include "gstyle-color-panel-private.h"
 #include "gstyle-color-panel-actions.h"
@@ -32,18 +36,17 @@
 
 G_DEFINE_TYPE (GstyleColorPanel, gstyle_color_panel, GTK_TYPE_BOX)
 
-static gchar * comp_names [N_GSTYLE_COLOR_COMPONENT] =
-  {
-    "hsv_h",
-    "hsv_s",
-    "hsv_v",
-    "lab_l",
-    "lab_a",
-    "lab_b",
-    "rgb_red",
-    "rgb_green",
-    "rgb_blue"
-  };
+static const gchar *comp_names [N_GSTYLE_COLOR_COMPONENT] = {
+  "hsv_h",
+  "hsv_s",
+  "hsv_v",
+  "lab_l",
+  "lab_a",
+  "lab_b",
+  "rgb_red",
+  "rgb_green",
+  "rgb_blue"
+};
 
 /* Conversion between component and color plane mode :
  * component without a corresponding mode return
@@ -182,7 +185,7 @@ void
 gstyle_color_panel_set_filter (GstyleColorPanel  *self,
                                GstyleColorFilter  filter)
 {
-  GstyleColorFilterFunc filter_func;
+  GstyleColorFilterFunc filter_func = NULL;
 
   g_return_if_fail (GSTYLE_IS_COLOR_PANEL (self));
 
@@ -840,7 +843,7 @@ static void
 set_preferred_unit (GstyleColorPanel *self,
                    GstyleColorUnit  preferred_unit)
 {
-  GIcon *icon;
+  GIcon *icon = NULL;
 
   g_assert (GSTYLE_IS_COLOR_PANEL (self));
 
@@ -975,7 +978,7 @@ void
 _gstyle_color_panel_update_prefs_page (GstyleColorPanel *self,
                                        const gchar      *page_name)
 {
-  GstyleColorPanelPrefs prefs_type;
+  GstyleColorPanelPrefs prefs_type = GSTYLE_COLOR_PANEL_PREFS_COMPONENTS;
 
   g_assert (GSTYLE_IS_COLOR_PANEL (self));
 
@@ -1376,6 +1379,8 @@ gstyle_color_panel_class_init (GstyleColorPanelClass *klass)
   object_class->dispose = gstyle_color_panel_dispose;
   object_class->get_property = gstyle_color_panel_get_property;
   object_class->set_property = gstyle_color_panel_set_property;
+
+  g_resources_register (gstyle_get_resource ());
 
   gtk_widget_class_set_template_from_resource (widget_class,
                                                "/org/gnome/libgstyle/ui/gstyle-color-panel.ui");

@@ -1,6 +1,6 @@
 /* gbp-flatpak-clone-widget.c
  *
- * Copyright © 2016 Endless Mobile, Inc.
+ * Copyright 2016 Endless Mobile, Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,13 +14,19 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
+
+#define G_LOG_DOMAIN "gbp-flatpak-clone-widget"
 
 #include <dazzle.h>
 #include <glib/gi18n.h>
 #include <json-glib/json-glib.h>
-#include <libgit2-glib/ggit.h>
-#include <ide.h>
+#include <libide-greeter.h>
+#include <libide-gui.h>
+#include <libide-threading.h>
+#include <libide-vcs.h>
 
 #include "gbp-flatpak-clone-widget.h"
 #include "gbp-flatpak-sources.h"
@@ -29,9 +35,13 @@
 
 struct _GbpFlatpakCloneWidget
 {
-  GtkBin          parent_instance;
+  IdeSurface      parent_instance;
 
+  /* Unowned */
+  IdeContext     *context;
   GtkProgressBar *clone_progress;
+
+  IdeNotification *notif;
 
   guint           is_ready : 1;
 
@@ -50,12 +60,12 @@ typedef enum {
 
 typedef struct
 {
-  SourceType type;
-  IdeVcsUri  *uri;
-  gchar      *branch;
-  gchar      *sha;
-  gchar      *name;
-  gchar     **patches;
+  SourceType   type;
+  IdeVcsUri   *uri;
+  gchar       *branch;
+  gchar       *sha;
+  gchar       *name;
+  gchar      **patches;
 } ModuleSource;
 
 typedef struct
@@ -72,7 +82,7 @@ enum {
   LAST_PROP
 };
 
-G_DEFINE_TYPE (GbpFlatpakCloneWidget, gbp_flatpak_clone_widget, GTK_TYPE_BIN)
+G_DEFINE_TYPE (GbpFlatpakCloneWidget, gbp_flatpak_clone_widget, IDE_TYPE_SURFACE)
 
 static void
 module_source_free (void *data)
@@ -118,24 +128,33 @@ static void
 gbp_flatpak_clone_widget_set_manifest (GbpFlatpakCloneWidget *self,
                                        const gchar           *manifest)
 {
-  gchar *ptr;
+  g_autofree gchar *name = NULL;
+  g_autofree gchar *title = NULL;
+  const gchar *ptr;
 
-  g_free (self->manifest);
-  g_free (self->app_id_override);
+  g_assert (IDE_IS_MAIN_THREAD ());
+  g_assert (GBP_IS_FLATPAK_CLONE_WIDGET (self));
+  g_assert (manifest != NULL);
+
+  g_clear_pointer (&self->manifest, g_free);
+  g_clear_pointer (&self->app_id_override, g_free);
+
+  name = g_path_get_basename (manifest);
+  /* translators: %s is replaced with the name of the flatpak manifest */
+  title = g_strdup_printf (_("Cloning project %s"), name);
+  ide_surface_set_title (IDE_SURFACE (self), title);
 
   /* if the filename does not end with .json, just set it right away,
    * even if it may fail later.
    */
-  ptr = g_strrstr (manifest, ".json");
-  if (!ptr)
+  if (!(ptr = g_strrstr (manifest, ".json")))
     {
       self->manifest = g_strdup (manifest);
       return;
     }
 
   /* search for the first '+' after the .json extension */
-  ptr = strchr (ptr, '+');
-  if (!ptr)
+  if (!(ptr = strchr (ptr, '+')))
     {
       self->manifest = g_strdup (manifest);
       return;
@@ -226,7 +245,7 @@ gbp_flatpak_clone_widget_class_init (GbpFlatpakCloneWidgetClass *klass)
                                                         (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
   gtk_widget_class_set_css_name (widget_class, "flatpakclonewidget");
-  gtk_widget_class_set_template_from_resource (widget_class, "/org/gnome/builder/plugins/flatpak-plugin/gbp-flatpak-clone-widget.ui");
+  gtk_widget_class_set_template_from_resource (widget_class, "/plugins/flatpak/gbp-flatpak-clone-widget.ui");
   gtk_widget_class_bind_template_child (widget_class, GbpFlatpakCloneWidget, clone_progress);
 }
 
@@ -234,39 +253,49 @@ static void
 gbp_flatpak_clone_widget_init (GbpFlatpakCloneWidget *self)
 {
   gtk_widget_init_template (GTK_WIDGET (self));
+  self->notif = ide_notification_new ();
   self->strip_components = 1;
 }
 
 static gboolean
 open_after_timeout (gpointer user_data)
 {
-  g_autoptr(GTask) task = user_data;
-  DownloadRequest *req;
+  g_autoptr(IdeProjectInfo) project_info = NULL;
+  g_autoptr(IdeTask) task = user_data;
   GbpFlatpakCloneWidget *self;
-  IdeWorkbench *workbench;
+  DownloadRequest *req;
+  GtkWidget *workspace;
 
   IDE_ENTRY;
 
-  req = g_task_get_task_data (task);
-  self = g_task_get_source_object (task);
+  req = ide_task_get_task_data (task);
+  self = ide_task_get_source_object (task);
+
   g_assert (GBP_IS_FLATPAK_CLONE_WIDGET (self));
+  g_assert (req != NULL);
+  g_assert (G_IS_FILE (req->project_file));
 
-  workbench = ide_widget_get_workbench (GTK_WIDGET (self));
-  g_assert (IDE_IS_WORKBENCH (workbench));
+  /* Maybe we were shut mid-operation? */
+  if (!(workspace = gtk_widget_get_ancestor (GTK_WIDGET (self), IDE_TYPE_GREETER_WORKSPACE)))
+    IDE_RETURN (G_SOURCE_REMOVE);
 
-  ide_workbench_open_project_async (workbench, req->project_file, NULL, NULL, NULL);
+  project_info = ide_project_info_new ();
+  ide_project_info_set_file (project_info, req->project_file);
+  ide_project_info_set_directory (project_info, req->project_file);
+
+  ide_greeter_workspace_open_project (IDE_GREETER_WORKSPACE (workspace), project_info);
 
   IDE_RETURN (G_SOURCE_REMOVE);
 }
 
 static void
-gbp_flatpak_clone_widget_worker_completed (GTask      *task,
+gbp_flatpak_clone_widget_worker_completed (IdeTask    *task,
                                            GParamSpec *pspec,
                                            gpointer    user_data)
 {
   GbpFlatpakCloneWidget *self = user_data;
 
-  if (!g_task_get_completed (task))
+  if (!ide_task_get_completed (task))
     return;
 
   dzl_object_animate_full (self->clone_progress,
@@ -278,7 +307,7 @@ gbp_flatpak_clone_widget_worker_completed (GTask      *task,
                            "fraction", 1.0,
                            NULL);
 
-  if (g_task_had_error (task))
+  if (ide_task_had_error (task))
     return;
 
   /* Wait for a second so animations can complete before opening
@@ -287,22 +316,162 @@ gbp_flatpak_clone_widget_worker_completed (GTask      *task,
   g_timeout_add (ANIMATION_DURATION_MSEC, open_after_timeout, g_object_ref (task));
 }
 
+static gboolean
+check_directory_exists_and_nonempty (GFile         *directory,
+                                     gboolean      *out_directory_exists_and_nonempty,
+                                     GCancellable  *cancellable,
+                                     GError       **error)
+{
+  g_autoptr(GError) local_error = NULL;
+  g_autoptr(GFileEnumerator) enumerator = NULL;
+  g_autoptr(GFileInfo) info = NULL;
+  g_autofree gchar *path = g_file_get_path (directory);
+
+  g_assert (G_IS_FILE (directory));
+  g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
+  g_assert (out_directory_exists_and_nonempty != NULL);
+
+  *out_directory_exists_and_nonempty = FALSE;
+  enumerator = g_file_enumerate_children (directory,
+                                          G_FILE_ATTRIBUTE_STANDARD_NAME,
+                                          G_FILE_QUERY_INFO_NONE,
+                                          cancellable,
+                                          &local_error);
+
+  if (enumerator == NULL)
+    {
+      if (g_error_matches (local_error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND))
+        {
+          *out_directory_exists_and_nonempty = FALSE;
+          return TRUE;
+        }
+
+      g_propagate_error (error, g_steal_pointer (&local_error));
+      return FALSE;
+    }
+
+  /* Check for at least one child in the directory - if there is
+   * one then the directory is non-empty. Otherwise, the directory
+   * is either empty or an error occurred. */
+  info = g_file_enumerator_next_file (enumerator, cancellable, &local_error);
+
+  if (info != NULL)
+    {
+      *out_directory_exists_and_nonempty = TRUE;
+      return TRUE;
+    }
+
+  if (local_error != NULL)
+    {
+      g_propagate_error (error, g_steal_pointer (&local_error));
+      return FALSE;
+    }
+
+  *out_directory_exists_and_nonempty = FALSE;
+  return TRUE;
+}
+
+static gboolean
+download_flatpak_sources_if_required (GbpFlatpakCloneWidget  *self,
+                                      DownloadRequest        *req,
+                                      GCancellable           *cancellable,
+                                      gboolean               *out_did_download,
+                                      GError                **error)
+{
+  g_autofree gchar *uristr = NULL;
+  g_autoptr(GError) local_error = NULL;
+
+  g_assert (req != NULL);
+  g_assert (out_did_download != NULL);
+  g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
+
+  *out_did_download = FALSE;
+
+  if (req->src->type == TYPE_GIT)
+    {
+      g_autoptr(IdeNotification) notif = ide_notification_new ();
+
+      uristr = ide_vcs_uri_to_string (req->src->uri);
+
+      /* Only safe because notifications come from main-thread */
+      g_object_bind_property (notif, "progress", self->clone_progress, "fraction", 0);
+
+      if (!ide_vcs_cloner_clone_simple (self->context,
+                                        "git",
+                                        uristr,
+                                        req->src->branch,
+                                        g_file_peek_path (req->destination),
+                                        notif,
+                                        cancellable,
+                                        error))
+        return FALSE;
+
+      *out_did_download = TRUE;
+
+      req->project_file = g_file_dup (req->destination);
+    }
+  else if (req->src->type == TYPE_ARCHIVE)
+    {
+      g_autoptr(GFile) source_dir = g_file_get_child (req->destination,
+                                                      req->src->name);
+      gboolean exists_and_nonempty = FALSE;
+
+      if (!check_directory_exists_and_nonempty (source_dir,
+                                                &exists_and_nonempty,
+                                                cancellable,
+                                                &local_error))
+        {
+          g_propagate_error (error, g_steal_pointer (&local_error));
+          return FALSE;
+        }
+
+      /*
+       * If the target directory already exists and was non-empty,
+       * then we have probably already checked out this project
+       * using GbpFlatpakCloneWidget. In that case, we don't want
+       * to overwrite it, we should get just return the source_dir
+       * directly.
+       */
+      if (exists_and_nonempty)
+        {
+          g_debug ("Re-using non-empty source dir %s already at destination",
+                   req->src->name);
+          req->project_file = g_steal_pointer (&source_dir);
+          *out_did_download = FALSE;
+        }
+      else
+        {
+          uristr = ide_vcs_uri_to_string (req->src->uri);
+          g_debug ("Fetching source archive from %s", uristr);
+
+          req->project_file = gbp_flatpak_sources_fetch_archive (uristr,
+                                                                 req->src->sha,
+                                                                 req->src->name,
+                                                                 req->destination,
+                                                                 self->strip_components,
+                                                                 &local_error);
+          if (local_error != NULL)
+            {
+              g_propagate_error (error, g_steal_pointer (&local_error));
+              return FALSE;
+            }
+
+          *out_did_download = TRUE;
+        }
+    }
+
+  return TRUE;
+}
+
 static void
-gbp_flatpak_clone_widget_worker (GTask        *task,
+gbp_flatpak_clone_widget_worker (IdeTask      *task,
                                  gpointer      source_object,
                                  gpointer      task_data,
                                  GCancellable *cancellable)
 {
   GbpFlatpakCloneWidget *self = source_object;
   DownloadRequest *req = task_data;
-  g_autofree gchar *uristr = NULL;
-  GgitFetchOptions *fetch_options;
-  g_autoptr(GgitCheckoutOptions) checkout_options = NULL;
-  g_autoptr(GgitCloneOptions) clone_options = NULL;
-  g_autoptr(GgitObject) parsed_rev = NULL;
-  g_autoptr(GgitRemoteCallbacks) callbacks = NULL;
-  g_autoptr(GgitRepository) repository = NULL;
-  g_autoptr(IdeProgress) progress = NULL;
+  gboolean did_download = FALSE;
   g_autoptr(GFile) src = NULL;
   g_autoptr(GFile) dst = NULL;
   g_autoptr(GFile) build_config = NULL;
@@ -314,104 +483,38 @@ gbp_flatpak_clone_widget_worker (GTask        *task,
   g_autofree gchar *manifest_file_name = NULL;
   g_autoptr(GError) error = NULL;
   gsize manifest_contents_len;
-  GType git_callbacks_type;
-  guint i;
 
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
   g_assert (GBP_IS_FLATPAK_CLONE_WIDGET (self));
   g_assert (req != NULL);
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  if (req->src->type == TYPE_GIT)
+  if (!download_flatpak_sources_if_required (self,
+                                             req,
+                                             cancellable,
+                                             &did_download,
+                                             &error))
     {
-      /* First, try to open an existing repository at this path */
-      repository = ggit_repository_open (req->destination, &error);
-
-      if (repository == NULL &&
-          !g_error_matches (error, GGIT_ERROR, GGIT_ERROR_NOTFOUND))
-        {
-          g_task_return_error (task, g_steal_pointer (&error));
-          return;
-        }
-
-      g_clear_error (&error);
-
-      if (repository == NULL)
-        {
-          /* HACK: we don't want libide to depend on libgit2 just yet, so for
-           * now, we just lookup the GType of the object we need from the git
-           * plugin by name.
-           */
-          git_callbacks_type = g_type_from_name ("IdeGitRemoteCallbacks");
-          g_assert (git_callbacks_type != 0);
-
-          callbacks = g_object_new (git_callbacks_type, NULL);
-          g_object_get (callbacks, "progress", &progress, NULL);
-          g_object_bind_property (progress, "fraction", self->clone_progress, "fraction", 0);
-
-          fetch_options = ggit_fetch_options_new ();
-          ggit_fetch_options_set_remote_callbacks (fetch_options, callbacks);
-
-          clone_options = ggit_clone_options_new ();
-          ggit_clone_options_set_is_bare (clone_options, FALSE);
-          ggit_clone_options_set_fetch_options (clone_options, fetch_options);
-          g_clear_pointer (&fetch_options, ggit_fetch_options_free);
-
-          uristr = ide_vcs_uri_to_string (req->src->uri);
-          repository = ggit_repository_clone (uristr, req->destination, clone_options, &error);
-          if (repository == NULL)
-            {
-              g_task_return_error (task, g_steal_pointer (&error));
-              return;
-            }
-
-          /* Now check out the revision, when specified */
-          if (req->src->branch != NULL)
-            {
-              parsed_rev = ggit_repository_revparse (repository, req->src->branch, &error);
-              if (parsed_rev == NULL)
-                {
-                  g_task_return_error (task, g_steal_pointer (&error));
-                  return;
-                }
-
-              checkout_options = ggit_checkout_options_new ();
-              ggit_repository_reset (repository, parsed_rev, GGIT_RESET_HARD,
-                                     checkout_options, &error);
-
-              if (error != NULL)
-                {
-                  g_task_return_error (task, g_steal_pointer (&error));
-                  return;
-                }
-            }
-        }
-      req->project_file = ggit_repository_get_workdir (repository);
-    }
-  else if (req->src->type == TYPE_ARCHIVE)
-    {
-      uristr = ide_vcs_uri_to_string (req->src->uri);
-      req->project_file = fetch_archive (uristr,
-                                         req->src->sha,
-                                         req->src->name,
-                                         req->destination,
-                                         self->strip_components,
-                                         &error);
-      if (error != NULL)
-        {
-          g_task_return_error (task, g_steal_pointer (&error));
-          return;
-        }
+      ide_task_return_error (task, g_steal_pointer (&error));
+      return;
     }
 
-  for (i = 0; req->src->patches[i]; i++)
+  /* No need to do any of the following, we can assume that
+   * we already have it there. */
+  if (!did_download)
     {
-      if (!apply_patch (req->src->patches[i],
-                        req->project_file,
-                        self->strip_components,
-                        &error))
-        {
-          g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_boolean (task, TRUE);
+      return;
+    }
+
+  for (guint i = 0; req->src->patches[i]; i++)
+    {
+      if (!gbp_flatpak_sources_apply_patch (req->src->patches[i],
+                                            req->project_file,
+                                            self->strip_components,
+                                            &error))
+      {
+          ide_task_return_error (task, g_steal_pointer (&error));
           return;
         }
     }
@@ -419,11 +522,10 @@ gbp_flatpak_clone_widget_worker (GTask        *task,
   /* copy manifest into the source directory */
   src = g_file_new_for_path (self->manifest);
   manifest_file_name = g_strjoin (".", self->id, "json", NULL);
-  dst = g_file_get_child (req->project_file,
-                          manifest_file_name);
+  dst = g_file_get_child (req->project_file, manifest_file_name);
   if (!g_file_copy (src, dst, G_FILE_COPY_OVERWRITE, NULL, NULL, NULL, &error))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
@@ -431,41 +533,35 @@ gbp_flatpak_clone_widget_worker (GTask        *task,
   build_config = g_file_get_child (req->project_file, ".buildconfig");
   if (g_file_query_exists (build_config, NULL))
     {
-      g_task_return_boolean (task, TRUE);
+      ide_task_return_boolean (task, TRUE);
       return;
     }
 
-  if (!g_file_get_contents (self->manifest,
-                            &manifest_contents, &manifest_contents_len, &error))
+  if (!g_file_get_contents (self->manifest, &manifest_contents, &manifest_contents_len, &error))
     {
       /* don't make this error fatal, but log a warning */
       g_warning ("Failed to load JSON manifest at %s: %s",
                  self->manifest, error->message);
-      g_error_free (error);
-      g_task_return_boolean (task, TRUE);
+      g_clear_error (&error);
+      ide_task_return_boolean (task, TRUE);
       return;
     }
 
   build_config_keyfile = g_key_file_new ();
-  g_key_file_set_string (build_config_keyfile, "default",
-                         "default", "true");
-  g_key_file_set_string (build_config_keyfile, "default",
-                         "device", "local");
-  g_key_file_set_string (build_config_keyfile, "default",
-                         "name", "Default");
+  g_key_file_set_string (build_config_keyfile, "default", "default", "true");
+  g_key_file_set_string (build_config_keyfile, "default", "device", "local");
+  g_key_file_set_string (build_config_keyfile, "default", "name", "Default");
 
   manifest_hash = g_compute_checksum_for_data (G_CHECKSUM_SHA1,
                                                (const guchar *) manifest_contents,
                                                manifest_contents_len);
   runtime_id = g_strdup_printf ("%s.json@%s", self->id, manifest_hash);
-  g_key_file_set_string (build_config_keyfile, "default",
-                         "runtime", runtime_id);
+  g_key_file_set_string (build_config_keyfile, "default", "runtime", runtime_id);
   g_debug ("Setting project runtime id %s", runtime_id);
 
   if (self->app_id_override != NULL)
     {
-      g_key_file_set_string (build_config_keyfile, "default",
-                             "app-id", self->app_id_override);
+      g_key_file_set_string (build_config_keyfile, "default", "app-id", self->app_id_override);
       g_debug ("Setting project app ID override %s", self->app_id_override);
     }
 
@@ -473,10 +569,10 @@ gbp_flatpak_clone_widget_worker (GTask        *task,
   if (!g_key_file_save_to_file (build_config_keyfile, build_config_path, &error))
     {
       g_warning ("Failed to save %s: %s", build_config_path, error->message);
-      g_error_free (error);
+      g_clear_error (&error);
     }
 
-  g_task_return_boolean (task, TRUE);
+  ide_task_return_boolean (task, TRUE);
 }
 
 static ModuleSource *
@@ -491,7 +587,6 @@ get_source (GbpFlatpakCloneWidget  *self,
   JsonArray *sources = NULL;
   guint num_modules;
   ModuleSource *src;
-  g_autoptr(IdeVcsUri) uri = NULL;
   GPtrArray *patches;
 
   parser = json_parser_new ();
@@ -573,22 +668,25 @@ gbp_flatpak_clone_widget_clone_async (GbpFlatpakCloneWidget   *self,
                                       GAsyncReadyCallback      callback,
                                       gpointer                 user_data)
 {
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autoptr(GFile) destination = NULL;
   g_autoptr(GError) error = NULL;
-  g_autofree gchar *path = NULL;
   DownloadRequest *req;
   ModuleSource *src;
 
   g_return_if_fail (GBP_IS_FLATPAK_CLONE_WIDGET (self));
   g_return_if_fail (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, gbp_flatpak_clone_widget_clone_async);
+  ide_task_set_release_on_propagate (task, FALSE);
+
+  self->context = ide_widget_get_context (GTK_WIDGET (self));
 
   src = get_source (self, &error);
   if (src == NULL)
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
@@ -615,8 +713,7 @@ gbp_flatpak_clone_widget_clone_async (GbpFlatpakCloneWidget   *self,
         }
     }
 
-  destination = ide_application_get_projects_directory (IDE_APPLICATION_DEFAULT);
-  g_assert (G_IS_FILE (destination));
+  destination = g_file_new_for_path (ide_get_projects_dir ());
 
   if (self->child_name)
     {
@@ -626,8 +723,8 @@ gbp_flatpak_clone_widget_clone_async (GbpFlatpakCloneWidget   *self,
 
   req = download_request_new (src, destination);
 
-  g_task_set_task_data (task, req, download_request_free);
-  g_task_run_in_thread (task, gbp_flatpak_clone_widget_worker);
+  ide_task_set_task_data (task, req, download_request_free);
+  ide_task_run_in_thread (task, gbp_flatpak_clone_widget_worker);
 
   g_signal_connect (task, "notify::completed",
                     G_CALLBACK (gbp_flatpak_clone_widget_worker_completed), self);
@@ -639,7 +736,7 @@ gbp_flatpak_clone_widget_clone_finish (GbpFlatpakCloneWidget *self,
                                        GError               **error)
 {
   g_return_val_if_fail (GBP_IS_FLATPAK_CLONE_WIDGET (self), FALSE);
-  g_return_val_if_fail (G_IS_TASK (result), FALSE);
+  g_return_val_if_fail (IDE_IS_TASK (result), FALSE);
 
-  return g_task_propagate_boolean (G_TASK (result), error);
+  return ide_task_propagate_boolean (IDE_TASK (result), error);
 }

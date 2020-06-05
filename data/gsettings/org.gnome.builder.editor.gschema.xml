@@ -16,6 +16,7 @@
         <choice value="default"/>
         <choice value="emacs"/>
         <choice value="vim"/>
+        <choice value="sublime"/>
       </choices>
       <default>'default'</default>
     </key>
@@ -49,6 +50,11 @@
       <summary>Show line numbers</summary>
       <description>If enabled, the editor will show line numbers.</description>
     </key>
+    <key name="show-relative-line-numbers" type="b">
+      <default>false</default>
+      <summary>Show relative line numbers</summary>
+      <description>If enabled, the editor will show relative line numbers.</description>
+    </key>
     <key name="smart-backspace" type="b">
       <default>true</default>
       <summary>Smart Backspace</summary>
@@ -73,10 +79,6 @@
     <key name="scroll-offset" type="i">
       <range min="0" max="999"/>
       <default>0</default>
-    </key>
-    <key name="minimum-word-size" type="i">
-      <range min="2" max="999"/>
-      <default>2</default>
     </key>
     <key name="show-map" type="b">
       <default>false</default>
@@ -114,6 +116,23 @@
       <range min="1" max="999"/>
       <summary>Autosave Frequency</summary>
       <description>The number of seconds after modification before auto saving.</description>
+    </key>
+    <key name="completion-n-rows" type="i">
+      <default>7</default>
+      <range min="1" max="32"/>
+      <summary>Completion Row Count</summary>
+      <description>The number of completion rows to display to the user.</description>
+    </key>
+    <key name="line-spacing" type="i">
+      <default>0</default>
+      <range min="0" max="32"/>
+      <summary>Line Spacing</summary>
+      <description>The number of pixels to include above and below lines in the editor.</description>
+    </key>
+    <key name="interactive-completion" type="b">
+      <default>true</default>
+      <summary>Interactive Completion</summary>
+      <description>If enabled, Builder will automatically display completion proposals as you type.</description>
     </key>
   </schema>
 </schemalist>

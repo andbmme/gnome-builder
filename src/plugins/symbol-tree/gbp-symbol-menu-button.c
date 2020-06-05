@@ -1,6 +1,6 @@
 /* gbp-symbol-menu-button.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,10 +14,13 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gbp-symbol-menu-button"
 
+#include <libide-sourceview.h>
 #include <glib/gi18n.h>
 
 #include "gbp-symbol-menu-button.h"
@@ -54,16 +57,18 @@ filter_symbols_cb (DzlTree     *tree,
                    DzlTreeNode *node,
                    gpointer     user_data)
 {
-  DzlPatternSpec *spec = user_data;
+  const gchar *casefold = user_data;
   const gchar *text = dzl_tree_node_get_text (node);
+  guint priority;
 
-  return dzl_pattern_spec_match (spec, text);
+  return ide_completion_fuzzy_match (text, casefold, &priority);
 }
 
 static void
 gbp_symbol_menu_button_search_changed (GbpSymbolMenuButton *self,
                                        GtkSearchEntry      *search_entry)
 {
+  g_autofree gchar *casefold = NULL;
   const gchar *text;
 
   g_assert (GBP_IS_SYMBOL_MENU_BUTTON (self));
@@ -71,13 +76,18 @@ gbp_symbol_menu_button_search_changed (GbpSymbolMenuButton *self,
 
   text = gtk_entry_get_text (GTK_ENTRY (search_entry));
 
+  if (!dzl_str_empty0 (text))
+    casefold = g_utf8_casefold (text, -1);
+
+  gbp_symbol_tree_builder_set_filter (GBP_SYMBOL_TREE_BUILDER (self->tree_builder), casefold);
+
   if (dzl_str_empty0 (text))
     dzl_tree_set_filter (self->tree, NULL, NULL, NULL);
   else
     dzl_tree_set_filter (self->tree,
                          filter_symbols_cb,
-                         dzl_pattern_spec_new (text),
-                         (GDestroyNotify)dzl_pattern_spec_unref);
+                         g_steal_pointer (&casefold),
+                         g_free);
 
   gtk_tree_view_expand_all (GTK_TREE_VIEW (self->tree));
 }
@@ -110,6 +120,30 @@ gbp_symbol_menu_button_get_icon_cell (GbpSymbolMenuButton *self)
     }
 
   return cell;
+}
+
+static void
+on_entry_activate (GbpSymbolMenuButton *self,
+                   GtkSearchEntry      *entry)
+{
+  GtkTreeModel *model;
+  GtkTreeIter iter;
+
+  g_assert (GBP_IS_SYMBOL_MENU_BUTTON (self));
+  g_assert (GTK_IS_SEARCH_ENTRY (entry));
+
+  model = gtk_tree_view_get_model (GTK_TREE_VIEW (self->tree));
+
+  if (gtk_tree_model_get_iter_first (model, &iter))
+    {
+      GtkTreePath *path;
+      GtkTreeViewColumn *column;
+
+      path = gtk_tree_path_new_first ();
+      column = gtk_tree_view_get_column (GTK_TREE_VIEW (self->tree), 0);
+      gtk_tree_view_row_activated (GTK_TREE_VIEW (self->tree), path, column);
+      gtk_tree_path_free (path);
+    }
 }
 
 static void
@@ -174,13 +208,14 @@ gbp_symbol_menu_button_class_init (GbpSymbolMenuButtonClass *klass)
 
   widget_class->destroy = gbp_symbol_menu_button_destroy;
 
-  gtk_widget_class_set_template_from_resource (widget_class, "/org/gnome/builder/plugins/symbol-tree-plugin/gbp-symbol-menu-button.ui");
+  gtk_widget_class_set_template_from_resource (widget_class, "/plugins/symbol-tree/gbp-symbol-menu-button.ui");
   gtk_widget_class_bind_template_child (widget_class, GbpSymbolMenuButton, popover);
   gtk_widget_class_bind_template_child (widget_class, GbpSymbolMenuButton, search_entry);
   gtk_widget_class_bind_template_child (widget_class, GbpSymbolMenuButton, symbol_icon);
   gtk_widget_class_bind_template_child (widget_class, GbpSymbolMenuButton, symbol_title);
   gtk_widget_class_bind_template_child (widget_class, GbpSymbolMenuButton, tree);
   gtk_widget_class_bind_template_child (widget_class, GbpSymbolMenuButton, tree_builder);
+  gtk_widget_class_bind_template_callback (widget_class, on_entry_activate);
 
   properties [PROP_SYMBOL_TREE] =
     g_param_spec_object ("symbol-tree",
@@ -218,7 +253,7 @@ gbp_symbol_menu_button_init (GbpSymbolMenuButton *self)
  *
  * Returns: (transfer none) (nullable): An #IdeSymbolTree or %NULL
  *
- * Since: 3.26
+ * Since: 3.32
  */
 IdeSymbolTree *
 gbp_symbol_menu_button_get_symbol_tree (GbpSymbolMenuButton *self)
@@ -234,7 +269,7 @@ gbp_symbol_menu_button_get_symbol_tree (GbpSymbolMenuButton *self)
  *
  * Sets the symbol tree to be displayed by the popover.
  *
- * Since: 3.26
+ * Since: 3.32
  */
 void
 gbp_symbol_menu_button_set_symbol_tree (GbpSymbolMenuButton *self,

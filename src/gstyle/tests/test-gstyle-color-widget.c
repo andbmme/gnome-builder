@@ -1,6 +1,6 @@
 /* test-gstyle-color-widget.c
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #include <glib.h>
@@ -35,6 +37,7 @@ create_color_swatch (const gchar *color_str)
                          "color", color,
                          "name-visible", FALSE,
                          "fallback-name-visible", FALSE,
+                         "visible", TRUE,
                          NULL);
 
   return swatch;
@@ -49,14 +52,19 @@ test_color_widget (void)
 
   gtk_init (NULL, NULL);
 
-  window = gtk_window_new (GTK_WINDOW_TOPLEVEL);
-  gtk_window_set_default_size (GTK_WINDOW (window), 200,100);
+  window = g_object_new (GTK_TYPE_WINDOW,
+                         "type", GTK_WINDOW_TOPLEVEL,
+                         "default-width", 200,
+                         "default-height", 100,
+                         "visible", TRUE,
+                         NULL);
   g_signal_connect (window, "destroy", G_CALLBACK (gtk_main_quit), NULL);
 
   box = g_object_new (GTK_TYPE_BOX,
                       "orientation", GTK_ORIENTATION_HORIZONTAL,
                       "expand", TRUE,
                       "spacing", 1,
+                      "visible", TRUE,
                       NULL);
 
   gtk_container_add (GTK_CONTAINER (window), box);
@@ -70,7 +78,6 @@ test_color_widget (void)
   swatch = create_color_swatch ("rgba(0, 100, 200, 0.5)");
   gtk_container_add (GTK_CONTAINER (box), GTK_WIDGET (swatch));
 
-  gtk_widget_show_all (window);
   gtk_main ();
 }
 

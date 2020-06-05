@@ -1,6 +1,6 @@
 /* ide-xml-analysis.h
  *
- * Copyright © 2017 Sebastien Lafargue <slafargue@gnome.org>
+ * Copyright 2017 Sebastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,14 +14,15 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #pragma once
 
-#include "diagnostics/ide-diagnostics.h"
-#include "ide-xml-symbol-node.h"
+#include <libide-code.h>
 
-#include <glib-object.h>
+#include "ide-xml-symbol-node.h"
 
 G_BEGIN_DECLS
 
@@ -38,6 +39,7 @@ struct _IdeXmlAnalysis
   gint64            sequence;
 };
 
+GType               ide_xml_analysis_get_type            (void);
 IdeDiagnostics     *ide_xml_analysis_get_diagnostics     (IdeXmlAnalysis   *self);
 IdeXmlSymbolNode   *ide_xml_analysis_get_root_node       (IdeXmlAnalysis   *self);
 gint64              ide_xml_analysis_get_sequence        (IdeXmlAnalysis   *self);

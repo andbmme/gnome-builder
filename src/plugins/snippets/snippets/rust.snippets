@@ -1,0 +1,312 @@
+snippet allow
+- desc #![allow(…)]
+	#${1:!}[allow(${2:lint})]
+	$0
+snippet deny
+- desc #![deny(…)]
+	#${1:!}[deny(${2:lint})]
+	$0
+snippet forbid
+- desc #![forbid(…)]
+	#${1:!}[forbid(${2:lint})]
+	$0
+snippet warn
+- desc #![warn(…)]
+	#${1:!}[warn(${2:lint})]
+	$0
+snippet doc
+- desc #![doc(…)]
+	#${1:!}[doc(${2:hidden})]
+	$0
+snippet deprecated
+- desc #[deprecated(…)]
+	#[deprecated(since = "${1:version}", note = "${2:reason}")]
+	$0
+snippet must_use
+- desc #[must_use]
+	#[must_use]
+	$0
+snippet should_panic
+- desc #[should_panic(…)]
+	#[should_panic(expected = "${1:reason}")]
+	$0
+snippet cfg
+- desc #![cfg(…)]
+	#${1:!}[cfg(${2:expression})]
+	$0
+snippet cfg_attr
+- desc #![cfg_attr(…)]
+	#${1:!}[cfg_attr(${2:expression}, ${3:attribute})]
+	$0
+snippet derive
+- desc #[derive(…)]
+	#[derive(${1:Debug})]
+	$0
+snippet repr
+- desc #[repr(…)]
+	#[repr(${1:C})]
+	$0
+snippet export_name
+- desc #[export_name]
+	#[export_name = "${1:symbol}"]
+	$0
+snippet link
+- desc #[link(…)]
+	#[link(name = "${1:library}")]
+	$0
+snippet macro_export
+- desc #[macro_export]
+	#[macro_export]
+	$0
+snippet no_mangle
+- desc #[no_mangle]
+	#[no_mangle]
+	$0
+snippet no_std
+- desc #![no_std]
+	#![no_std]
+	$0
+snippet no_main
+- desc #![no_main]
+	#![no_main]
+	$0
+snippet non_exhaustive
+- desc #[non_exhaustive]
+	#[non_exhaustive]
+	$0
+snippet inline
+- desc #[inline]
+	#[inline]
+	$0
+snippet struct
+	struct ${1:StructName} {
+		$0
+	}
+snippet tuple
+- desc Create tuple struct
+	struct ${1:TupleName}(${2:i32});$0
+snippet unit
+- desc Create unit-like struct
+	struct ${1:StructName};$0
+snippet union
+	#[repr(C)]
+	union ${1:UnionName} {
+		$0
+	}
+snippet enum
+	enum ${1:EnumName} {
+		$0
+	}
+snippet trait
+	trait ${1:TraitName} {
+		$0
+	}
+snippet impl
+	impl ${1:Type} {
+		$0
+	}
+snippet implfor
+- desc impl … for
+	impl ${1:Trait} for ${2:Type} {
+		$0
+	}
+snippet default
+- desc Implement Default trait
+	impl Default for ${1:Type} {
+		fn default() -> Self {
+			$0
+		}
+	}
+snippet drop
+- desc Implement Drop trait
+	impl Drop for ${1:Type} {
+		fn drop(&mut self) {
+			$0
+		}
+	}
+snippet macro
+- desc Define declarative macro
+	macro_rules! ${1:macro_name} {
+		(${2}) => {
+			$0
+		};
+	}
+snippet proc_macro
+- desc Implement procedural macro
+	#[proc_macro]
+	pub fn ${1:macro_name}(item: TokenStream) -> TokenStream {
+		unimplemented!()$0
+	}
+snippet proc_macro_attribute
+- desc Implement attribute macro
+	#[proc_macro_attribute]
+	pub fn ${1:attribute_name}(attr: TokenStream, item: TokenStream) -> TokenStream {
+		unimplemented!()$0
+	}
+	$0
+snippet proc_macro_derive
+- desc Implement derive macro
+	#[proc_macro_derive(${1:Name})]
+	pub fn derive_${$1|functify}(item: TokenStream) -> TokenStream {
+		unimplemented!()$0
+	}
+snippet spawn
+- desc thread::spawn(…)
+	thread::spawn(move || {
+		$0
+	});
+snippet fn
+	fn ${1:function_name}(${2:&mut self}) {
+		unimplemented!()$0
+	}
+snippet fnr
+- desc Create function with return
+	fn ${1:function_name}(${2:&mut self}) -> ${3:&mut Self} {
+		unimplemented!()$0
+	}
+snippet fns
+- desc Create function signature
+	fn ${1:function_name}(${2:&mut self});$0
+snippet fnrs
+- desc Create function signature with return
+	fn ${1:function_name}(${2:&mut self}) -> ${3:&mut Self};$0
+snippet match
+	match ${1:expression} {
+		_ => unimplemented!(),$0
+	}
+snippet option
+- desc Pattern matching for Option
+	match ${1:expression} {
+		None => ${2},
+		Some(${3:val}) => ${4},
+	}$0
+snippet result
+- desc Pattern matching for Result
+	match ${1:expression} {
+		Ok(${2:val}) => ${3},
+		Err(${4:err}) => ${5},
+	}$0
+snippet if
+	if ${1:condition} {
+		$0
+	}
+snippet else
+	else {
+		$0
+	}
+snippet elseif
+- desc else if
+	else if ${1:condition} {
+		$0
+	}
+snippet iflet
+- desc if let
+	if let ${1:Some(val)} = ${2:expression} {
+		$0
+	}
+snippet while
+	while ${1:condition} {
+		$0
+	}
+snippet whilelet
+- desc while let
+	while let ${1:Some(val)} = ${2:expression} {
+		$0
+	}
+snippet for
+	for ${1:item} in ${2:collection} {
+		$0
+	}
+snippet loop
+	loop {
+		$0
+	}
+snippet unsafe
+	unsafe {
+		$0
+	}
+snippet extern
+	extern {
+		$0
+	}
+snippet const
+	const ${1:CONST_NAME}: ${2:type} = ${3:expression};$0
+snippet static
+	static ${1:STATIC_NAME}: ${2:type} = ${3:expression};$0
+snippet let
+	let ${1:variable} = ${2:expression};$0
+snippet type
+	type ${1:Alias} = ${2:Type};$0
+snippet thread_local
+- desc thread_local! {…}
+	thread_local! {
+		$0
+	}
+snippet vec
+- desc vec![…]
+	vec![${1:expression}; ${2:size}]$0
+snippet format_args
+- desc format_args!(…)
+	format_args!("${1:{}}", ${2:expression})$0
+snippet format
+- desc format!(…)
+	format!("${1:{}}", ${2:expression})$0
+snippet write
+- desc write!(…)
+	write!(${1:buffer}, "${2:{}}", ${3:expression})$0
+snippet writeln
+- desc writeln!(…)
+	writeln!(${1:buffer}, "${2:{}}", ${3:expression})$0
+snippet print
+- desc print!(…)
+	print!("${1:{}}", ${2:expression})$0
+snippet println
+- desc println!(…)
+	println!("${1:{}}", ${2:expression})$0
+snippet eprint
+- desc eprint!(…)
+	eprint!("${1:{}}", ${2:expression})$0
+snippet eprintln
+- desc eprintln!(…)
+	eprintln!("${1:{}}", ${2:expression})$0
+snippet dbg
+- desc dbg!(…)
+	dbg!(${1:expression})$0
+snippet panic
+- desc panic!(…)
+	panic!("${1:{}}", ${2:expression})$0
+snippet unreachable
+- desc unreachable!(…)
+	unreachable!("${1:reason}")$0
+snippet unimplemented
+- desc unimplemented!()
+	unimplemented!()$0
+snippet todo
+- desc todo!()
+	todo!()$0
+snippet assert
+- desc assert!(…)
+	assert!(${1:expression})$0
+snippet assert_eq
+- desc assert_eq!(…)
+	assert_eq!(${1:expression1}, ${2:expression2})$0
+snippet assert_ne
+- desc assert_ne!(…)
+	assert_ne!(${1:expression1}, ${2:expression2})$0
+snippet testsmod
+- desc Create tests module
+	#[cfg(test)]
+	mod tests {
+		use super::*;
+
+		#[test]
+		fn ${1:function_name}() {
+			unimplemented!()$0
+		}
+	}
+snippet test
+- desc Create test
+	#[test]
+	fn ${1:function_name}() {
+		unimplemented!()$0
+	}

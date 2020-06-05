@@ -1,6 +1,6 @@
 /* gbp-meson-test-provider.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,11 +14,15 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gbp-meson-test-provider"
 
+#include <dazzle.h>
 #include <json-glib/json-glib.h>
+#include <libide-threading.h>
 
 #include "gbp-meson-build-system.h"
 #include "gbp-meson-test.h"
@@ -27,11 +31,27 @@
 struct _GbpMesonTestProvider
 {
   IdeTestProvider  parent_instance;
-  GCancellable    *build_cancellable;
+  DzlSignalGroup  *monitor_signals;
+  GFileMonitor    *build_ninja_monitor;
   guint            reload_source;
+  guint            did_initial_load : 1;
 };
 
+typedef struct
+{
+  IdeTest *test;
+  VtePty  *pty;
+} Run;
+
 G_DEFINE_TYPE (GbpMesonTestProvider, gbp_meson_test_provider, IDE_TYPE_TEST_PROVIDER)
+
+static void
+run_free (Run *run)
+{
+  g_clear_object (&run->test);
+  g_clear_object (&run->pty);
+  g_slice_free (Run, run);
+}
 
 static void
 gbp_meson_test_provider_load_json (GbpMesonTestProvider *self,
@@ -56,6 +76,7 @@ gbp_meson_test_provider_load_json (GbpMesonTestProvider *self,
       g_autoptr(IdeEnvironment) env = ide_environment_new ();
       g_autoptr(IdeTest) test = NULL;
       g_autoptr(GFile) workdir = NULL;
+      g_auto(GStrv) environ_ = NULL;
       const gchar *name;
       const gchar *workdir_path;
       const gchar *group = NULL;
@@ -129,10 +150,14 @@ gbp_meson_test_provider_load_json (GbpMesonTestProvider *self,
 
       g_ptr_array_add (cmd, NULL);
 
+      environ_ = ide_environment_get_environ (env);
+      if (ide_strv_empty0 (environ_))
+        g_clear_pointer (&environ_, g_strfreev);
+
       test = g_object_new (GBP_TYPE_MESON_TEST,
                            "command", (gchar **)cmd->pdata,
                            "display-name", name,
-                           "env", env,
+                           "environ", environ_,
                            "group", group,
                            "id", name,
                            "timeout", timeout,
@@ -167,7 +192,8 @@ gbp_meson_test_provider_communicate_cb (GObject      *object,
   parser = json_parser_new ();
 
   if (!json_parser_load_from_data (parser, stdout_buf, -1, &error) ||
-      NULL == (root = json_parser_get_root (parser)))
+      !(root = json_parser_get_root (parser)) ||
+      ide_object_in_destruction (IDE_OBJECT (self)))
     IDE_GOTO (failure);
 
   gbp_meson_test_provider_load_json (self, root);
@@ -183,7 +209,7 @@ failure:
 
 static void
 gbp_meson_test_provider_do_reload (GbpMesonTestProvider *self,
-                                   IdeBuildPipeline     *pipeline)
+                                   IdePipeline     *pipeline)
 {
   g_autoptr(IdeSubprocessLauncher) launcher = NULL;
   g_autoptr(IdeSubprocess) subprocess = NULL;
@@ -193,21 +219,23 @@ gbp_meson_test_provider_do_reload (GbpMesonTestProvider *self,
   IDE_ENTRY;
 
   g_assert (GBP_IS_MESON_TEST_PROVIDER (self));
-  g_assert (IDE_IS_BUILD_PIPELINE (pipeline));
+  g_assert (IDE_IS_PIPELINE (pipeline));
 
   ide_test_provider_clear (IDE_TEST_PROVIDER (self));
 
-  if (NULL == (launcher = ide_build_pipeline_create_launcher (pipeline, &error)))
+  if (NULL == (launcher = ide_pipeline_create_launcher (pipeline, &error)))
     IDE_GOTO (failure);
 
-  ide_subprocess_launcher_set_flags (launcher, G_SUBPROCESS_FLAGS_STDOUT_PIPE);
+  ide_subprocess_launcher_set_flags (launcher,
+                                     G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE);
 
-  builddir = ide_build_pipeline_get_builddir (pipeline);
+  builddir = ide_pipeline_get_builddir (pipeline);
   ide_subprocess_launcher_set_cwd (launcher, builddir);
 
   ide_subprocess_launcher_push_argv (launcher, "meson");
   ide_subprocess_launcher_push_argv (launcher, "introspect");
   ide_subprocess_launcher_push_argv (launcher, "--tests");
+  ide_subprocess_launcher_push_argv (launcher, builddir);
 
   if (NULL == (subprocess = ide_subprocess_launcher_spawn (launcher, NULL, &error)))
     IDE_GOTO (failure);
@@ -229,38 +257,11 @@ failure:
   IDE_EXIT;
 }
 
-static void
-gbp_meson_test_provider_build_cb (GObject      *object,
-                                  GAsyncResult *result,
-                                  gpointer      user_data)
-{
-  IdeBuildPipeline *pipeline = (IdeBuildPipeline *)object;
-  g_autoptr(GbpMesonTestProvider) self = user_data;
-  g_autoptr(GError) error = NULL;
-
-  IDE_ENTRY;
-
-  g_assert (IDE_IS_BUILD_PIPELINE (pipeline));
-  g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (GBP_IS_MESON_TEST_PROVIDER (self));
-
-  if (!ide_build_pipeline_build_finish (pipeline, result, &error))
-    {
-      g_message ("%s", error->message);
-      ide_test_provider_set_loading (IDE_TEST_PROVIDER (self), FALSE);
-      IDE_EXIT;
-    }
-
-  gbp_meson_test_provider_do_reload (self, pipeline);
-
-  IDE_EXIT;
-}
-
 static gboolean
 gbp_meson_test_provider_reload (gpointer user_data)
 {
   GbpMesonTestProvider *self = user_data;
-  IdeBuildPipeline *pipeline;
+  IdePipeline *pipeline;
   IdeBuildManager *build_manager;
   IdeBuildSystem *build_system;
   IdeContext *context;
@@ -269,17 +270,13 @@ gbp_meson_test_provider_reload (gpointer user_data)
 
   g_assert (GBP_IS_MESON_TEST_PROVIDER (self));
 
-  self->reload_source = 0;
-
-  /* Cancel any other builds in-flight */
-  g_cancellable_cancel (self->build_cancellable);
-  g_clear_object (&self->build_cancellable);
+  dzl_clear_source (&self->reload_source);
 
   /*
    * Check that we're working with a meson build system.
    */
   context = ide_object_get_context (IDE_OBJECT (self));
-  build_system = ide_context_get_build_system (context);
+  build_system = ide_build_system_from_context (context);
   if (!GBP_IS_MESON_BUILD_SYSTEM (build_system))
     IDE_RETURN (G_SOURCE_REMOVE);
 
@@ -287,32 +284,13 @@ gbp_meson_test_provider_reload (gpointer user_data)
    * Get access to the pipeline so we can create a launcher to
    * introspect meson from within the build environment.
    */
-  build_manager = ide_context_get_build_manager (context);
+  build_manager = ide_build_manager_from_context (context);
   pipeline = ide_build_manager_get_pipeline (build_manager);
   if (pipeline == NULL)
     IDE_RETURN (G_SOURCE_REMOVE);
 
   ide_test_provider_set_loading (IDE_TEST_PROVIDER (self), TRUE);
-
-  /*
-   * Make sure that the build pipeline has advanced enough for
-   * us to continue processing the tests.
-   */
-  self->build_cancellable = g_cancellable_new ();
-  /*
-   * TODO: We want to try to avoid the pipeline build like this in
-   * the future because it advances the pipeline when the project
-   * is opened. Instead, we might want a CONFIGURE stage that auto
-   * generates the info, and then watch that GFile.
-   *
-   * But to do that well, we need to coordinate with the panel to
-   * be lazy about fetching unit tests until the panel is displayed.
-   */
-  ide_build_pipeline_build_async (pipeline,
-                                  IDE_BUILD_PHASE_CONFIGURE,
-                                  self->build_cancellable,
-                                  gbp_meson_test_provider_build_cb,
-                                  g_object_ref (self));
+  gbp_meson_test_provider_do_reload (self, pipeline);
 
   IDE_RETURN (G_SOURCE_REMOVE);
 }
@@ -333,14 +311,59 @@ gbp_meson_test_provider_queue_reload (IdeTestProvider *provider)
 }
 
 static void
+pipeline_build_finished_cb (GbpMesonTestProvider *self,
+                            gboolean              failed,
+                            IdePipeline          *pipeline)
+{
+  g_assert (GBP_IS_MESON_TEST_PROVIDER (self));
+  g_assert (IDE_IS_PIPELINE (pipeline));
+
+  if (failed || self->did_initial_load)
+    return;
+
+  self->did_initial_load = TRUE;
+
+  /* We need to do our first load of state, so do that now */
+  gbp_meson_test_provider_reload (self);
+}
+
+static void
 gbp_meson_test_provider_notify_pipeline (GbpMesonTestProvider *self,
                                          GParamSpec           *pspec,
                                          IdeBuildManager      *build_manager)
 {
+  IdePipeline *pipeline;
+
   g_assert (GBP_IS_MESON_TEST_PROVIDER (self));
   g_assert (IDE_IS_BUILD_MANAGER (build_manager));
 
-  gbp_meson_test_provider_queue_reload (IDE_TEST_PROVIDER (self));
+  if (self->build_ninja_monitor != NULL)
+    {
+      g_file_monitor_cancel (self->build_ninja_monitor);
+      g_clear_object (&self->build_ninja_monitor);
+      dzl_signal_group_set_target (self->monitor_signals, NULL);
+    }
+
+  g_assert (self->build_ninja_monitor == NULL);
+
+  if ((pipeline = ide_build_manager_get_pipeline (build_manager)))
+    {
+      g_autofree gchar *build_ninja = NULL;
+      g_autoptr(GFile) file = NULL;
+
+      build_ninja = ide_pipeline_build_builddir_path (pipeline, "build.ninja", NULL);
+      file = g_file_new_for_path (build_ninja);
+      self->build_ninja_monitor = g_file_monitor (file, 0, NULL, NULL);
+      dzl_signal_group_set_target (self->monitor_signals, self->build_ninja_monitor);
+
+      self->did_initial_load = FALSE;
+
+      g_signal_connect_object (pipeline,
+                               "finished",
+                               G_CALLBACK (pipeline_build_finished_cb),
+                               self,
+                               G_CONNECT_SWAPPED);
+    }
 }
 
 static void
@@ -349,27 +372,31 @@ gbp_meson_test_provider_run_cb (GObject      *object,
                                 gpointer      user_data)
 {
   IdeRunner *runner = (IdeRunner *)object;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
-  IdeTest *test;
+  Run *run;
 
   g_assert (IDE_IS_RUNNER (runner));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
-  test = g_task_get_task_data (task);
-  g_assert (IDE_IS_TEST (test));
+  run = ide_task_get_task_data (task);
+
+  g_assert (run != NULL);
+  g_assert (IDE_IS_TEST (run->test));
+  g_assert (!run->pty || VTE_IS_PTY (run->pty));
 
   if (!ide_runner_run_finish (runner, result, &error))
     {
-      ide_test_set_status (test, IDE_TEST_STATUS_FAILED);
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_test_set_status (run->test, IDE_TEST_STATUS_FAILED);
+      ide_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
-  ide_test_set_status (test, IDE_TEST_STATUS_SUCCESS);
+  ide_test_set_status (run->test, IDE_TEST_STATUS_SUCCESS);
+  ide_object_destroy (IDE_OBJECT (runner));
 
-  g_task_return_boolean (task, TRUE);
+  ide_task_return_boolean (task, TRUE);
 }
 
 static void
@@ -377,78 +404,96 @@ gbp_meson_test_provider_run_build_cb (GObject      *object,
                                       GAsyncResult *result,
                                       gpointer      user_data)
 {
-  IdeBuildPipeline *pipeline = (IdeBuildPipeline *)object;
-  g_autoptr(IdeSubprocess) subprocess = NULL;
+  IdePipeline *pipeline = (IdePipeline *)object;
+  g_autoptr(IdeSimpleBuildTarget) build_target = NULL;
   g_autoptr(IdeRunner) runner = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
   GCancellable *cancellable;
   const gchar * const *command;
-  IdeEnvironment *env;
+  const gchar * const *environ_;
+  IdeTestManager *test_manager;
   const gchar *builddir;
+  IdeContext *context;
   IdeRuntime *runtime;
-  IdeTest *test;
   GFile *workdir;
+  Run *run;
+  gint tty_fd;
 
   IDE_ENTRY;
 
-  g_assert (IDE_IS_BUILD_PIPELINE (pipeline));
+  g_assert (IDE_IS_PIPELINE (pipeline));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
-  if (!ide_build_pipeline_build_finish (pipeline, result, &error))
+  run = ide_task_get_task_data (task);
+
+  g_assert (run != NULL);
+  g_assert (IDE_IS_TEST (run->test));
+  g_assert (!run->pty || VTE_IS_PTY (run->pty));
+
+  if (!ide_pipeline_build_finish (pipeline, result, &error))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       IDE_EXIT;
     }
 
+  /* Set our command as specified by meson */
+  build_target = ide_simple_build_target_new (NULL);
+  command = gbp_meson_test_get_command (GBP_MESON_TEST (run->test));
+  ide_simple_build_target_set_argv (build_target, command);
+
   /* Create a runner to execute the test within */
-  runtime = ide_build_pipeline_get_runtime (pipeline);
-  runner = ide_runtime_create_runner (runtime, NULL);
+  runtime = ide_pipeline_get_runtime (pipeline);
+  runner = ide_runtime_create_runner (runtime, IDE_BUILD_TARGET (build_target));
 
   if (runner == NULL)
     {
-      g_task_return_new_error (task,
-                               G_IO_ERROR,
-                               G_IO_ERROR_FAILED,
-                               "Failed to create runner for executing unit test");
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_FAILED,
+                                 "Failed to create runner for executing unit test");
       IDE_EXIT;
     }
 
-  test = g_task_get_task_data (task);
-  cancellable = g_task_get_cancellable (task);
+  cancellable = ide_task_get_cancellable (task);
 
-  g_assert (IDE_IS_TEST (test));
+  g_assert (IDE_IS_TEST (run->test));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  ide_runner_set_flags (runner,
-                        (G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-                         G_SUBPROCESS_FLAGS_STDERR_PIPE));
+  context = ide_object_get_context (IDE_OBJECT (pipeline));
+  test_manager = ide_test_manager_from_context (context);
+  tty_fd = ide_test_manager_open_pty (test_manager);
+  ide_runner_take_tty_fd (runner, tty_fd);
 
   /* Default to running from builddir */
-  builddir = ide_build_pipeline_get_builddir (pipeline);
+  builddir = ide_pipeline_get_builddir (pipeline);
   ide_runner_set_cwd (runner, builddir);
 
   /* And override of the test requires it */
-  workdir = gbp_meson_test_get_workdir (GBP_MESON_TEST (test));
+  workdir = gbp_meson_test_get_workdir (GBP_MESON_TEST (run->test));
   if (workdir != NULL)
     {
       g_autofree gchar *path = g_file_get_path (workdir);
       ide_runner_set_cwd (runner, path);
     }
 
-  /* Set our command as specified by meson */
-  command = gbp_meson_test_get_command (GBP_MESON_TEST (test));
-  ide_runner_push_args (runner, command);
-
   /* Make sure the environment is respected */
-  if (NULL != (env = gbp_meson_test_get_env (GBP_MESON_TEST (test))))
+  if ((environ_ = gbp_meson_test_get_environ (GBP_MESON_TEST (run->test))))
     {
       IdeEnvironment *dest = ide_runner_get_environment (runner);
-      ide_environment_copy_into (env, dest, TRUE);
+
+      for (guint i = 0; environ_[i] != NULL; i++)
+        {
+          g_autofree gchar *key = NULL;
+          g_autofree gchar *value = NULL;
+
+          if (ide_environ_parse (environ_[i], &key, &value))
+            ide_environment_setenv (dest, key, value);
+        }
     }
 
-  ide_test_set_status (test, IDE_TEST_STATUS_RUNNING);
+  ide_test_set_status (run->test, IDE_TEST_STATUS_RUNNING);
 
   ide_runner_run_async (runner,
                         cancellable,
@@ -461,36 +506,43 @@ gbp_meson_test_provider_run_build_cb (GObject      *object,
 static void
 gbp_meson_test_provider_run_async (IdeTestProvider     *provider,
                                    IdeTest             *test,
-                                   IdeBuildPipeline    *pipeline,
+                                   IdePipeline         *pipeline,
+                                   VtePty              *pty,
                                    GCancellable        *cancellable,
                                    GAsyncReadyCallback  callback,
                                    gpointer             user_data)
 {
   GbpMesonTestProvider *self = (GbpMesonTestProvider *)provider;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
+  Run *run;
 
   IDE_ENTRY;
 
   g_assert (GBP_IS_MESON_TEST_PROVIDER (self));
   g_assert (GBP_IS_MESON_TEST (test));
-  g_assert (IDE_IS_BUILD_PIPELINE (pipeline));
+  g_assert (IDE_IS_PIPELINE (pipeline));
+  g_assert (!pty || VTE_IS_PTY (pty));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, gbp_meson_test_provider_run_async);
-  g_task_set_task_data (task, g_object_ref (test), g_object_unref);
-  g_task_set_priority (task, G_PRIORITY_LOW);
+  run = g_slice_new0 (Run);
+  run->test = g_object_ref (test);
+  run->pty = pty ? g_object_ref (pty) : NULL;
+
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, gbp_meson_test_provider_run_async);
+  ide_task_set_task_data (task, run, run_free);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
 
   /* Currently, we don't have a way to determine what targets
    * need to be built before the test can run, so we must build
    * the entire project up to the build phase.
    */
 
-  ide_build_pipeline_build_async (pipeline,
-                                  IDE_BUILD_PHASE_BUILD,
-                                  cancellable,
-                                  gbp_meson_test_provider_run_build_cb,
-                                  g_steal_pointer (&task));
+  ide_pipeline_build_async (pipeline,
+                            IDE_PIPELINE_PHASE_BUILD,
+                            cancellable,
+                            gbp_meson_test_provider_run_build_cb,
+                            g_steal_pointer (&task));
 
   IDE_EXIT;
 }
@@ -501,24 +553,27 @@ gbp_meson_test_provider_run_finish (IdeTestProvider  *provider,
                                     GError          **error)
 {
   g_assert (IDE_IS_TEST_PROVIDER (provider));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_TASK (result));
 
-  return g_task_propagate_boolean (G_TASK (result), error);
+  return ide_task_propagate_boolean (IDE_TASK (result), error);
 }
 
 static void
-gbp_meson_test_provider_constructed (GObject *object)
+gbp_meson_test_provider_parent_set (IdeObject *object,
+                                    IdeObject *parent)
 {
   GbpMesonTestProvider *self = (GbpMesonTestProvider *)object;
   IdeBuildManager *build_manager;
   IdeContext *context;
 
   g_assert (GBP_IS_MESON_TEST_PROVIDER (self));
+  g_assert (!parent || IDE_IS_OBJECT (parent));
 
-  G_OBJECT_CLASS (gbp_meson_test_provider_parent_class)->constructed (object);
+  if (parent == NULL)
+    return;
 
   context = ide_object_get_context (IDE_OBJECT (self));
-  build_manager = ide_context_get_build_manager (context);
+  build_manager = ide_build_manager_from_context (context);
 
   g_signal_connect_object (build_manager,
                            "notify::pipeline",
@@ -530,25 +585,57 @@ gbp_meson_test_provider_constructed (GObject *object)
 }
 
 static void
+build_ninja_changed_cb (GbpMesonTestProvider *self,
+                        GFile                *file,
+                        GFile                *other_file,
+                        GFileMonitorEvent     event,
+                        GFileMonitor         *monitor)
+{
+  g_assert (GBP_IS_MESON_TEST_PROVIDER (self));
+  g_assert (G_IS_FILE_MONITOR (monitor));
+
+  if (event == G_FILE_MONITOR_EVENT_CHANGED || event == G_FILE_MONITOR_EVENT_CREATED)
+    gbp_meson_test_provider_queue_reload (IDE_TEST_PROVIDER (self));
+}
+
+static void
 gbp_meson_test_provider_dispose (GObject *object)
 {
   GbpMesonTestProvider *self = (GbpMesonTestProvider *)object;
 
   dzl_clear_source (&self->reload_source);
-  g_cancellable_cancel (self->build_cancellable);
-  g_clear_object (&self->build_cancellable);
+  dzl_signal_group_set_target (self->monitor_signals, NULL);
+
+  if (self->build_ninja_monitor)
+    {
+      g_file_monitor_cancel (self->build_ninja_monitor);
+      g_clear_object (&self->build_ninja_monitor);
+    }
 
   G_OBJECT_CLASS (gbp_meson_test_provider_parent_class)->dispose (object);
+}
+
+static void
+gbp_meson_test_provider_finalize (GObject *object)
+{
+  GbpMesonTestProvider *self = (GbpMesonTestProvider *)object;
+
+  g_clear_object (&self->monitor_signals);
+
+  G_OBJECT_CLASS (gbp_meson_test_provider_parent_class)->finalize (object);
 }
 
 static void
 gbp_meson_test_provider_class_init (GbpMesonTestProviderClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
+  IdeObjectClass *i_object_class = IDE_OBJECT_CLASS (klass);
   IdeTestProviderClass *provider_class = IDE_TEST_PROVIDER_CLASS (klass);
 
-  object_class->constructed = gbp_meson_test_provider_constructed;
   object_class->dispose = gbp_meson_test_provider_dispose;
+  object_class->finalize = gbp_meson_test_provider_finalize;
+
+  i_object_class->parent_set = gbp_meson_test_provider_parent_set;
 
   provider_class->run_async = gbp_meson_test_provider_run_async;
   provider_class->run_finish = gbp_meson_test_provider_run_finish;
@@ -558,4 +645,11 @@ gbp_meson_test_provider_class_init (GbpMesonTestProviderClass *klass)
 static void
 gbp_meson_test_provider_init (GbpMesonTestProvider *self)
 {
+  self->monitor_signals = dzl_signal_group_new (G_TYPE_FILE_MONITOR);
+
+  dzl_signal_group_connect_object (self->monitor_signals,
+                                   "changed",
+                                   G_CALLBACK (build_ninja_changed_cb),
+                                   self,
+                                   G_CONNECT_SWAPPED);
 }

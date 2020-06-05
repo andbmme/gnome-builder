@@ -1,6 +1,6 @@
 /* ide-xml-stack.c
  *
- * Copyright © 2017 Sebastien Lafargue <slafargue@gnome.org>
+ * Copyright 2017 Sebastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,10 +14,14 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#include <dazzle.h>
+#include <libide-code.h>
+
 #include "ide-xml-stack.h"
-#include <ide.h>
 
 typedef struct _StackItem
 {

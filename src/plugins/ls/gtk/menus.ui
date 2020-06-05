@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <menu id="project-tree-menu">
+    <section id="project-tree-menu-open-section">
+      <submenu id="project-tree-menu-open-with-menu">
+        <section id="project-tree-menu-open-with-section">
+          <item>
+            <attribute name="id">project-tree-menu-open-editor</attribute>
+            <attribute name="label" translatable="yes">Directory Browser</attribute>
+            <attribute name="action">project-tree.open-with-hint</attribute>
+            <attribute name="target" type="s">'ls'</attribute>
+          </item>
+        </section>
+      </submenu>
+    </section>
+  </menu>
+  <menu id="ide-source-view-popup-menu">
+    <section id="ide-source-view-popup-menu-files-section">
+      <item>
+        <attribute name="id">source-view-open-directory</attribute>
+        <attribute name="label" translatable="yes">Switch to Folder</attribute>
+        <attribute name="action">ls.open-directory</attribute>
+      </item>
+      <item>
+        <attribute name="id">source-view-open-in-files</attribute>
+        <attribute name="label" translatable="yes">Open Containing Folder</attribute>
+        <attribute name="action">ls.open-in-files</attribute>
+      </item>
+    </section>
+  </menu>
+</interface>

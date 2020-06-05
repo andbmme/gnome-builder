@@ -1,6 +1,6 @@
 /* gbp-flatpak-build-target.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gbp-flatpak-build-target"
@@ -34,11 +36,28 @@ enum {
 };
 
 static gchar *
+gbp_flatpak_build_target_get_display_name (IdeBuildTarget *build_target)
+{
+  GbpFlatpakBuildTarget *self = GBP_FLATPAK_BUILD_TARGET (build_target);
+
+  return g_strdup_printf ("%s <span fgalpha='32767' size='smaller'>(Flatpak)</span>", self->command);
+}
+
+static gchar *
 gbp_flatpak_build_target_get_name (IdeBuildTarget *build_target)
 {
   GbpFlatpakBuildTarget *self = GBP_FLATPAK_BUILD_TARGET (build_target);
 
   return g_strdup (self->command);
+}
+
+static gchar **
+gbp_flatpak_build_target_get_argv (IdeBuildTarget *build_target)
+{
+  GbpFlatpakBuildTarget *self = GBP_FLATPAK_BUILD_TARGET (build_target);
+  gchar *argv[] = { self->command, NULL };
+
+  return g_strdupv (argv);
 }
 
 static GFile *
@@ -63,7 +82,9 @@ gbp_flatpak_build_target_get_priority (IdeBuildTarget *build_target)
 static void
 build_target_iface_init (IdeBuildTargetInterface *iface)
 {
+  iface->get_display_name = gbp_flatpak_build_target_get_display_name;
   iface->get_name = gbp_flatpak_build_target_get_name;
+  iface->get_argv = gbp_flatpak_build_target_get_argv;
   iface->get_install_directory = gbp_flatpak_build_target_get_install_directory;
   iface->get_priority = gbp_flatpak_build_target_get_priority;
 }
@@ -133,7 +154,7 @@ gbp_flatpak_build_target_class_init (GbpFlatpakBuildTargetClass *klass)
   properties [PROP_COMMAND] =
     g_param_spec_string ("command", NULL, NULL, NULL,
                          G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
-  
+
   g_object_class_install_properties (object_class, N_PROPS, properties);
 }
 

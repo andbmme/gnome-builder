@@ -1,6 +1,6 @@
 /* gbp-todo-panel.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,24 +14,30 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gbp-todo-panel"
 
-#include <ide.h>
+#include <glib/gi18n.h>
+#include <libide-code.h>
+#include <libide-gui.h>
 
 #include "gbp-todo-item.h"
 #include "gbp-todo-panel.h"
 
 struct _GbpTodoPanel
 {
-  GtkBin        parent_instance;
+  DzlDockWidget  parent_instance;
 
-  GtkTreeView  *tree_view;
-  GbpTodoModel *model;
+  GbpTodoModel  *model;
+
+  GtkTreeView   *tree_view;
+  GtkStack      *stack;
 };
 
-G_DEFINE_TYPE (GbpTodoPanel, gbp_todo_panel, GTK_TYPE_BIN)
+G_DEFINE_TYPE (GbpTodoPanel, gbp_todo_panel, DZL_TYPE_DOCK_WIDGET)
 
 enum {
   PROP_0,
@@ -49,7 +55,6 @@ gbp_todo_panel_cell_data_func (GtkCellLayout   *cell_layout,
                                gpointer         data)
 {
   g_autoptr(GbpTodoItem) item = NULL;
-  g_autofree gchar *markup = NULL;
   const gchar *message;
 
   gtk_tree_model_get (tree_model, iter, 0, &item, -1);
@@ -92,7 +97,6 @@ gbp_todo_panel_row_activated (GbpTodoPanel      *self,
 {
   g_autoptr(GbpTodoItem) item = NULL;
   g_autoptr(GFile) file = NULL;
-  g_autoptr(IdeUri) uri = NULL;
   g_autofree gchar *fragment = NULL;
   IdeWorkbench *workbench;
   GtkTreeModel *model;
@@ -126,26 +130,26 @@ gbp_todo_panel_row_activated (GbpTodoPanel      *self,
       GFile *workdir;
 
       context = ide_workbench_get_context (workbench);
-      vcs = ide_context_get_vcs (context);
-      workdir = ide_vcs_get_working_directory (vcs);
+      vcs = ide_vcs_from_context (context);
+      workdir = ide_vcs_get_workdir (vcs);
       file = g_file_get_child (workdir, path);
     }
 
-  uri = ide_uri_new_from_file (file);
-
-  /* Set lineno info so that the editor can jump
-   * to the location of the TODO item. Our line number
-   * from the model is 1-based, and we need 0-based for
+  /* Set lineno info so that the editor can jump to the location of the TODO
+   * item. Our line number from the model is 1-based, and we need 0-based for
    * our API to open files.
    */
   lineno = gbp_todo_item_get_lineno (item);
   if (lineno > 0)
     lineno--;
 
-  fragment = g_strdup_printf ("L%u", lineno);
-  ide_uri_set_fragment (uri, fragment);
-
-  ide_workbench_open_uri_async (workbench, uri, "editor", 0, NULL, NULL, NULL);
+  ide_workbench_open_at_async (workbench,
+                               file,
+                               "editor",
+                               lineno,
+                               -1,
+                               IDE_BUFFER_OPEN_FLAGS_NONE,
+                               NULL, NULL, NULL);
 }
 
 static gboolean
@@ -282,13 +286,33 @@ static void
 gbp_todo_panel_init (GbpTodoPanel *self)
 {
   GtkWidget *scroller;
+  GtkWidget *empty;
   GtkTreeSelection *selection;
+
+  self->stack = g_object_new (GTK_TYPE_STACK,
+                              "transition-duration", 333,
+                              "transition-type", GTK_STACK_TRANSITION_TYPE_CROSSFADE,
+                              "homogeneous", FALSE,
+                              "visible", TRUE,
+                              NULL);
+  gtk_container_add (GTK_CONTAINER (self), GTK_WIDGET (self->stack));
+
+  empty = g_object_new (DZL_TYPE_EMPTY_STATE,
+                        "title", _("Loading TODOs…"),
+                        "subtitle", _("Please wait while we scan your project"),
+                        "icon-name", "emblem-ok-symbolic",
+                        "valign", GTK_ALIGN_START,
+                        "visible", TRUE,
+                        NULL);
+  gtk_container_add (GTK_CONTAINER (self->stack), empty);
 
   scroller = g_object_new (GTK_TYPE_SCROLLED_WINDOW,
                            "visible", TRUE,
                            "vexpand", TRUE,
                            NULL);
-  gtk_container_add (GTK_CONTAINER (self), scroller);
+  gtk_container_add_with_properties (GTK_CONTAINER (self->stack), scroller,
+                                     "name", "todos",
+                                     NULL);
 
   self->tree_view = g_object_new (IDE_TYPE_FANCY_TREE_VIEW,
                                   "has-tooltip", TRUE,
@@ -323,6 +347,8 @@ gbp_todo_panel_init (GbpTodoPanel *self)
  * Gets the model being displayed by the treeview.
  *
  * Returns: (transfer none) (nullable): a #GbpTodoModel.
+ *
+ * Since: 3.32
  */
 GbpTodoModel *
 gbp_todo_panel_get_model (GbpTodoPanel *self)
@@ -348,4 +374,12 @@ gbp_todo_panel_set_model (GbpTodoPanel *self,
 
       g_object_notify_by_pspec (G_OBJECT (self), properties [PROP_MODEL]);
     }
+}
+
+void
+gbp_todo_panel_make_ready (GbpTodoPanel *self)
+{
+  g_return_if_fail (GBP_IS_TODO_PANEL (self));
+
+  gtk_stack_set_visible_child_name (self->stack, "todos");
 }

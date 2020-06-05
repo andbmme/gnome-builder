@@ -1,6 +1,6 @@
 /* gstyle-color-predefined.h
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #pragma once
@@ -24,11 +26,11 @@ G_BEGIN_DECLS
 
 typedef struct
 {
-  gchar  *name;
-  guint8  red;
-  guint8  green;
-  guint8  blue;
-  guint8  index;
+  const gchar *name;
+  guint8       red;
+  guint8       green;
+  guint8       blue;
+  guint8       index;
 } NamedColor;
 
 G_GNUC_UNUSED

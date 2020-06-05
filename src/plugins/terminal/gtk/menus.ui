@@ -1,32 +1,5 @@
-<?xml version="1.0"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <interface>
-  <menu id="terminal-view-document-menu">
-    <section id="terminal-document-section">
-      <attribute name="label" translatable="yes">Terminal</attribute>
-      <item>
-        <attribute name="label" translatable="yes">Split</attribute>
-        <attribute name="action">layoutstack.split-view</attribute>
-        <attribute name="target" type="s">''</attribute>
-        <attribute name="verb-icon-name">builder-split-tab-symbolic</attribute>
-      </item>
-      <item>
-        <attribute name="label" translatable="yes">Reset</attribute>
-        <attribute name="action">terminal-view.reset</attribute>
-      </item>
-      <item>
-        <attribute name="label" translatable="yes">Reset and Clear</attribute>
-        <attribute name="action">terminal-view.reset-and-clear</attribute>
-      </item>
-      <item>
-        <attribute name="label" translatable="yes">Save As</attribute>
-        <attribute name="action">terminal-view.save-as</attribute>
-      </item>
-      <item>
-        <attribute name="label" translatable="yes">Close</attribute>
-        <attribute name="action">layoutstack.close-view</attribute>
-      </item>
-    </section>
-  </menu>
   <menu id="new-document-menu">
     <section id="new-document-section">
       <item>
@@ -40,19 +13,33 @@
       <item>
         <attribute name="id">new-build-terminal</attribute>
         <attribute name="after">new-terminal</attribute>
-        <attribute name="before">new-build-terminal</attribute>
         <attribute name="label" translatable="yes">New _Build Terminal</attribute>
         <attribute name="action">win.new-terminal-in-runtime</attribute>
         <attribute name="accel">&lt;ctrl&gt;&lt;shift&gt;&lt;alt&gt;t</attribute>
       </item>
+      <item>
+        <attribute name="id">new-run-terminal</attribute>
+        <attribute name="after">new-build-terminal</attribute>
+        <attribute name="label" translatable="yes">New _Runtime Terminal</attribute>
+        <attribute name="action">win.new-terminal-in-runner</attribute>
+        <attribute name="accel">&lt;ctrl&gt;&lt;alt&gt;t</attribute>
+      </item>
     </section>
   </menu>
-  <menu id="ide-source-view-popup-menu">
-    <section id="ide-source-view-popup-menu-terminal-section">
-      <attribute name="after">ide-source-view-popup-menu-zoom-section</attribute>
+  <menu id="ide-terminal-page-document-menu">
+    <section id="terminal-section">
+      <attribute name="label" translatable="yes">Terminal</attribute>
       <item>
-        <attribute name="label" translatable="yes">New terminal in directory</attribute>
-        <attribute name="action">win.new-terminal-in-dir</attribute>
+        <attribute name="id">terminal-open-in-new-frame</attribute>
+        <attribute name="label" translatable="yes">Open in New Frame</attribute>
+        <attribute name="action">frame.open-in-new-frame</attribute>
+        <attribute name="target" type="s">""</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Split</attribute>
+        <attribute name="action">frame.split-page</attribute>
+        <attribute name="target" type="s">""</attribute>
+        <attribute name="verb-icon-name">builder-split-tab-symbolic</attribute>
       </item>
     </section>
   </menu>

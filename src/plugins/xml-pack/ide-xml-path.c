@@ -1,6 +1,6 @@
 /* ide-xml-path.c
  *
- * Copyright © 2017 Sebastien Lafargue <slafargue@gnome.org>
+ * Copyright 2017 Sebastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #include "ide-xml-path.h"
@@ -43,13 +45,12 @@ ide_xml_path_prepend_node (IdeXmlPath       *self,
 void
 ide_xml_path_dump (IdeXmlPath *self)
 {
-  IdeXmlSymbolNode *node;
-
   g_return_if_fail (self);
 
   for (gint i = 0; i < self->nodes->len; ++i)
     {
-      node = g_ptr_array_index (self->nodes, i);
+      IdeXmlSymbolNode *node = g_ptr_array_index (self->nodes, i);
+
       ide_xml_symbol_node_print (node, 0, FALSE, TRUE, TRUE);
     }
 }
@@ -105,7 +106,7 @@ ide_xml_path_free (IdeXmlPath *self)
   g_assert (self);
   g_assert_cmpint (self->ref_count, ==, 0);
 
-  g_ptr_array_unref (self->nodes);
+  g_clear_pointer (&self->nodes, g_ptr_array_unref);
 
   g_slice_free (IdeXmlPath, self);
 }
@@ -114,7 +115,7 @@ IdeXmlPath *
 ide_xml_path_ref (IdeXmlPath *self)
 {
   g_return_val_if_fail (self, NULL);
-  g_return_val_if_fail (self->ref_count, NULL);
+  g_return_val_if_fail (self->ref_count > 0, NULL);
 
   g_atomic_int_inc (&self->ref_count);
 
@@ -125,7 +126,7 @@ void
 ide_xml_path_unref (IdeXmlPath *self)
 {
   g_return_if_fail (self);
-  g_return_if_fail (self->ref_count);
+  g_return_if_fail (self->ref_count > 0);
 
   if (g_atomic_int_dec_and_test (&self->ref_count))
     ide_xml_path_free (self);

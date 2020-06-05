@@ -1,6 +1,6 @@
 /* ide-xml-tree-builder.c
  *
- * Copyright © 2017 Sebastien Lafargue <slafargue@gnome.org>
+ * Copyright 2017 Sebastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 
@@ -51,7 +53,7 @@ typedef struct
 typedef struct
 {
   IdeXmlTreeBuilder *self;
-  GTask             *task;
+  IdeTask           *task;
   GPtrArray         *schemas;
   guint              index;
 } FetchSchemasState;
@@ -83,17 +85,12 @@ create_diagnostic (IdeContext            *context,
                    gint                   col,
                    IdeDiagnosticSeverity  severity)
 {
-  g_autoptr(IdeSourceLocation) loc = NULL;
-  g_autoptr(IdeFile) ifile = NULL;
+  g_autoptr(IdeLocation) loc = NULL;
 
   g_assert (IDE_IS_CONTEXT (context));
   g_assert (G_IS_FILE (file));
 
-  ifile = ide_file_new (context, file);
-  loc = ide_source_location_new (ifile,
-                                 line - 1,
-                                 col - 1,
-                                 0);
+  loc = ide_location_new (file, line - 1, col - 1);
 
   return ide_diagnostic_new (severity, msg, loc);
 }
@@ -113,12 +110,12 @@ ide_xml_tree_builder_get_file_content (IdeXmlTreeBuilder *self,
   g_assert (G_IS_FILE (file));
 
   context = ide_object_get_context (IDE_OBJECT (self));
-  manager = ide_context_get_buffer_manager (context);
+  manager = ide_buffer_manager_from_context (context);
   buffer = ide_buffer_manager_find_buffer (manager, file);
 
   if (buffer != NULL)
     {
-      content = ide_buffer_get_content (buffer);
+      content = ide_buffer_dup_content (buffer);
       sequence_tmp = ide_buffer_get_change_count (buffer);
     }
 
@@ -154,7 +151,7 @@ fetch_schemas_cb (GObject      *object,
   g_assert (DZL_IS_TASK_CACHE (schemas_cache));
   g_assert (G_IS_ASYNC_RESULT (result));
   g_assert (state != NULL);
-  g_assert (G_IS_TASK (state->task));
+  g_assert (IDE_IS_TASK (state->task));
   g_assert (IDE_IS_XML_TREE_BUILDER (state->self));
   g_assert (state->schemas != NULL);
   g_assert (state->index < state->schemas->len);
@@ -189,13 +186,13 @@ fetch_schemas_cb (GObject      *object,
       entry->mtime = cache_entry->mtime;
     }
 
-  count = g_task_get_task_data (state->task);
+  count = ide_task_get_task_data (state->task);
   g_assert (count != NULL);
 
   (*count)--;
 
   if (*count == 0)
-    g_task_return_boolean (state->task, TRUE);
+    ide_task_return_boolean (state->task, TRUE);
 }
 
 static void
@@ -205,7 +202,7 @@ fetch_schemas_async (IdeXmlTreeBuilder   *self,
                      GAsyncReadyCallback  callback,
                      gpointer             user_data)
 {
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autoptr(GPtrArray) schemas_copy = NULL;
   IdeXmlService *service;
   DzlTaskCache *schemas_cache;
@@ -217,12 +214,12 @@ fetch_schemas_async (IdeXmlTreeBuilder   *self,
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
   /* TODO: use a worker thread */
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, fetch_schemas_async);
-  g_task_set_priority (task, G_PRIORITY_LOW);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, fetch_schemas_async);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
 
   count = g_new0 (guint, 1);
-  g_task_set_task_data (task, count, g_free);
+  ide_task_set_task_data (task, count, g_free);
 
   /* Make a copy of schemas to ensure they cannot be changed
    * during the lifetime of the operation, as the index within
@@ -231,7 +228,7 @@ fetch_schemas_async (IdeXmlTreeBuilder   *self,
   schemas_copy = g_ptr_array_new_with_free_func ((GDestroyNotify)ide_xml_schema_cache_entry_unref);
 
   context = ide_object_get_context (IDE_OBJECT (self));
-  service = ide_context_get_service_typed (context, IDE_TYPE_XML_SERVICE);
+  service = ide_xml_service_from_context (context);
   schemas_cache = ide_xml_service_get_schemas_cache (service);
 
   for (guint i = 0; i < schemas->len; i++)
@@ -263,7 +260,7 @@ fetch_schemas_async (IdeXmlTreeBuilder   *self,
     }
 
   if (*count == 0)
-    g_task_return_boolean (task, TRUE);
+    ide_task_return_boolean (task, TRUE);
 }
 
 static gboolean
@@ -271,17 +268,17 @@ fetch_schemas_finish (IdeXmlTreeBuilder  *self,
                       GAsyncResult       *result,
                       GError            **error)
 {
-  GTask *task = (GTask *)result;
+  IdeTask *task = (IdeTask *)result;
 
   g_return_val_if_fail (IDE_IS_XML_TREE_BUILDER (self), FALSE);
-  g_return_val_if_fail (G_IS_TASK (result), FALSE);
+  g_return_val_if_fail (IDE_IS_TASK (result), FALSE);
   g_return_val_if_fail (error != NULL, FALSE);
 
-  return g_task_propagate_boolean (task, error);
+  return ide_task_propagate_boolean (task, error);
 }
 
 static void
-ide_xml_tree_builder_parse_worker (GTask        *task,
+ide_xml_tree_builder_parse_worker (IdeTask      *task,
                                    gpointer      source_object,
                                    gpointer      task_data,
                                    GCancellable *cancellable)
@@ -296,14 +293,14 @@ ide_xml_tree_builder_parse_worker (GTask        *task,
   gint parser_flags;
 
   g_assert (IDE_IS_XML_TREE_BUILDER (self));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
   g_assert (state != NULL);
   g_assert (cancellable == NULL || G_IS_CANCELLABLE (cancellable));
 
-  if (g_task_return_error_if_cancelled (task))
+  if (ide_task_return_error_if_cancelled (task))
     return;
 
-  state = g_task_get_task_data (task);
+  state = ide_task_get_task_data (task);
   g_assert (state != NULL);
   g_assert (state->analysis != NULL);
 
@@ -330,7 +327,7 @@ ide_xml_tree_builder_parse_worker (GTask        *task,
           const gchar *schema_data;
           gsize schema_size;
           g_autoptr (IdeDiagnostics) diagnostics = NULL;
-          gboolean schema_ret;
+          gboolean schema_ret = FALSE;
 
           if (entry->kind == SCHEMA_KIND_RNG || entry->kind == SCHEMA_KIND_XML_SCHEMA)
             {
@@ -384,7 +381,7 @@ ide_xml_tree_builder_parse_worker (GTask        *task,
               continue;
             }
 
-          if (ide_xml_validator_validate (self->validator, doc, &diagnostics) != 0)
+          if (!ide_xml_validator_validate (self->validator, doc, &diagnostics))
             {
               g_autoptr(IdeDiagnostic) diagnostic = NULL;
               g_autofree gchar *uri = NULL;
@@ -418,9 +415,9 @@ ide_xml_tree_builder_parse_worker (GTask        *task,
       g_debug ("can't create xmlDoc\n");
     }
 
-  g_task_return_pointer (task,
-                         g_steal_pointer (&state->analysis),
-                         (GDestroyNotify)ide_xml_analysis_unref);
+  ide_task_return_pointer (task,
+                           g_steal_pointer (&state->analysis),
+                           ide_xml_analysis_unref);
 }
 
 static void
@@ -430,16 +427,16 @@ ide_xml_tree_builder_build_tree_cb2 (GObject      *object,
 {
   IdeXmlTreeBuilder *self = (IdeXmlTreeBuilder *)object;
   g_autoptr(GError) error = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
 
   g_assert (IDE_IS_XML_TREE_BUILDER (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   if (!fetch_schemas_finish (self, result, &error))
-    g_task_return_error (task, g_steal_pointer (&error));
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
-    g_task_run_in_thread (task, ide_xml_tree_builder_parse_worker);
+    ide_task_run_in_thread (task, ide_xml_tree_builder_parse_worker);
 }
 
 static void
@@ -447,32 +444,31 @@ ide_xml_tree_builder_build_tree_cb (GObject      *object,
                                     GAsyncResult *result,
                                     gpointer      user_data)
 {
-  IdeXmlParser *parser = (IdeXmlParser *)object;
   g_autoptr(IdeXmlAnalysis) analysis = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
   IdeXmlTreeBuilder *self;
   TreeBuilderState *state;
   GCancellable *cancellable;
 
-  g_assert (IDE_IS_XML_PARSER (parser));
+  g_assert (IDE_IS_XML_PARSER (object));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
-  self = g_task_get_source_object (task);
+  self = ide_task_get_source_object (task);
   g_assert (IDE_IS_XML_TREE_BUILDER (self));
 
-  state = g_task_get_task_data (task);
+  state = ide_task_get_task_data (task);
   g_assert (state != NULL);
 
-  cancellable = g_task_get_cancellable (task);
+  cancellable = ide_task_get_cancellable (task);
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
   analysis = ide_xml_parser_get_analysis_finish (self->parser, result, &error);
 
   if (analysis == NULL)
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
@@ -481,9 +477,9 @@ ide_xml_tree_builder_build_tree_cb (GObject      *object,
 
   if (analysis->schemas == NULL)
     {
-      g_task_return_pointer (task,
-                             g_steal_pointer (&analysis),
-                             (GDestroyNotify)ide_xml_analysis_unref);
+      ide_task_return_pointer (task,
+                               g_steal_pointer (&analysis),
+                               ide_xml_analysis_unref);
       return;
     }
 
@@ -501,7 +497,7 @@ ide_xml_tree_builder_build_tree_async (IdeXmlTreeBuilder   *self,
                                        GAsyncReadyCallback  callback,
                                        gpointer             user_data)
 {
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autoptr(TreeBuilderState) state = NULL;
   g_autoptr(GBytes) content = NULL;
   gint64 sequence = 0;
@@ -510,18 +506,18 @@ ide_xml_tree_builder_build_tree_async (IdeXmlTreeBuilder   *self,
   g_return_if_fail (G_IS_FILE (file));
   g_return_if_fail (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, ide_xml_tree_builder_build_tree_async);
-  g_task_set_priority (task, G_PRIORITY_LOW);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, ide_xml_tree_builder_build_tree_async);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
 
   content = ide_xml_tree_builder_get_file_content (self, file, &sequence);
 
   if (content == NULL || g_bytes_get_size (content) == 0)
     {
-      g_task_return_new_error (task,
-                               G_IO_ERROR,
-                               G_IO_ERROR_FAILED,
-                               _("Failed to create the XML tree."));
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_FAILED,
+                                 _("Failed to create the XML tree."));
       return;
     }
 
@@ -530,9 +526,9 @@ ide_xml_tree_builder_build_tree_async (IdeXmlTreeBuilder   *self,
   state->content = g_bytes_ref (content);
   state->sequence = sequence;
 
-  g_task_set_task_data (task,
-                        g_steal_pointer (&state),
-                        (GDestroyNotify)tree_builder_state_free);
+  ide_task_set_task_data (task,
+                          g_steal_pointer (&state),
+                          tree_builder_state_free);
 
   ide_xml_parser_get_analysis_async (self->parser,
                                      file,
@@ -551,44 +547,47 @@ ide_xml_tree_builder_build_tree_finish (IdeXmlTreeBuilder  *self,
   g_return_val_if_fail (IDE_IS_XML_TREE_BUILDER (self), NULL);
   g_return_val_if_fail (G_IS_ASYNC_RESULT (result), NULL);
 
-  return g_task_propagate_pointer (G_TASK (result), error);
+  return ide_task_propagate_pointer (IDE_TASK (result), error);
 }
 
 static void
-ide_xml_tree_builder_finalize (GObject *object)
+ide_xml_tree_builder_destroy (IdeObject *object)
 {
   IdeXmlTreeBuilder *self = (IdeXmlTreeBuilder *)object;
 
-  g_clear_object (&self->parser);
-  g_clear_object (&self->validator);
+  ide_clear_and_destroy_object (&self->parser);
+  ide_clear_and_destroy_object (&self->validator);
 
-  G_OBJECT_CLASS (ide_xml_tree_builder_parent_class)->finalize (object);
+  IDE_OBJECT_CLASS (ide_xml_tree_builder_parent_class)->destroy (object);
 }
 
 static void
-ide_xml_tree_builder_constructed (GObject *object)
+ide_xml_tree_builder_parent_set (IdeObject *object,
+                                 IdeObject *parent)
 {
   IdeXmlTreeBuilder *self = (IdeXmlTreeBuilder *)object;
-  IdeContext *context;
 
-  G_OBJECT_CLASS (ide_xml_tree_builder_parent_class)->constructed (object);
+  g_assert (IDE_IS_XML_TREE_BUILDER (self));
+  g_assert (!parent || IDE_IS_OBJECT (parent));
 
-  context = ide_object_get_context (IDE_OBJECT (self));
-  g_assert (IDE_IS_CONTEXT (context));
+  if (parent == NULL)
+    return;
 
   self->parser = g_object_new (IDE_TYPE_XML_PARSER,
-                               "context", context,
+                               "parent", self,
                                NULL);
-  self->validator = ide_xml_validator_new (context);
+  self->validator = g_object_new (IDE_TYPE_XML_VALIDATOR,
+                                  "parent", self,
+                                  NULL);
 }
 
 static void
 ide_xml_tree_builder_class_init (IdeXmlTreeBuilderClass *klass)
 {
-  GObjectClass *object_class = G_OBJECT_CLASS (klass);
+  IdeObjectClass *i_object_class = IDE_OBJECT_CLASS (klass);
 
-  object_class->constructed = ide_xml_tree_builder_constructed;
-  object_class->finalize = ide_xml_tree_builder_finalize;
+  i_object_class->parent_set = ide_xml_tree_builder_parent_set;
+  i_object_class->destroy = ide_xml_tree_builder_destroy;
 }
 
 static void

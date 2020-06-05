@@ -1,6 +1,6 @@
 /* ide-xml-rng-grammar.h
  *
- * Copyright © 2017 Sebastien Lafargue <slafargue@gnome.org>
+ * Copyright 2017 Sebastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #pragma once
@@ -30,7 +32,7 @@ typedef struct _IdeXmlRngGrammar IdeXmlRngGrammar;
 
 struct _IdeXmlRngGrammar
 {
-  guint   ref_count;
+  volatile gint     ref_count;
 
   IdeXmlRngDefine  *start_defines;
 
@@ -42,6 +44,7 @@ struct _IdeXmlRngGrammar
   IdeXmlRngGrammar *children;
 };
 
+GType                 ide_xml_rng_grammar_get_type  (void);
 IdeXmlRngGrammar     *ide_xml_rng_grammar_new       (void);
 void                  ide_xml_rng_grammar_add_child (IdeXmlRngGrammar *self,
                                                      IdeXmlRngGrammar *child);

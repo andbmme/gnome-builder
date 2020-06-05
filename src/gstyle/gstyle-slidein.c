@@ -1,6 +1,6 @@
 /* gstyle-slidein.c
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
 * it under the terms of the GNU General Public License as published by
@@ -16,7 +16,9 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  * Initial ideas based on Gnome Builder Pnl dock system :
- * Copyright © 2016 Christian Hergert <chergert@redhat.com>
+ * Copyright 2016-2019 Christian Hergert <chergert@redhat.com>
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gstyle-slidein"
@@ -339,7 +341,7 @@ animate_stop (GstyleSlidein *self)
 static void
 animation_done_cb (GstyleSlidein *self)
 {
-  GstyleSlideinDirectionType animation_direction;
+  GstyleSlideinDirectionType animation_direction = GSTYLE_SLIDEIN_DIRECTION_TYPE_NONE;
 
   g_assert (GSTYLE_IS_SLIDEIN (self));
 

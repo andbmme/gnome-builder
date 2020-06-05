@@ -26,6 +26,7 @@
           <object class="GtkSearchEntry" id="search_entry">
             <property name="margin-bottom">6</property>
             <property name="visible">true</property>
+            <signal name="activate" handler="on_entry_activate" swapped="yes" object="GbpSymbolMenuButton"/>
           </object>
         </child>
         <child>
@@ -35,6 +36,7 @@
             <property name="min-content-width">250</property>
             <property name="min-content-height">300</property>
             <property name="max-content-height">600</property>
+            <property name="max-content-width">500</property>
             <property name="visible">true</property>
             <child>
               <object class="DzlTree" id="tree">

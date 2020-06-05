@@ -1,0 +1,31 @@
+include: 'https://gitlab.gnome.org/GNOME/citemplates/raw/master/flatpak/flatpak_ci_initiative.yml'
+
+variables:
+    BUNDLE: "gnome-builder-git.flatpak"
+
+flatpak:
+    extends: .flatpak
+    variables:
+        GIT_SUBMODULE_STRATEGY: normal
+
+        # Replace with your manifest path
+        MANIFEST_PATH: "build-aux/flatpak/org.gnome.Builder.json"
+        RUNTIME_REPO: "https://nightly.gnome.org/gnome-nightly.flatpakrepo"
+        # Replace with your application name, as written in the manifest
+        FLATPAK_MODULE: "gnome-builder"
+        APP_ID: "org.gnome.Builder"
+        # Make sure to keep this in sync with the Flatpak manifest, all arguments
+        # are passed except the config-args because we build it ourselves
+        MESON_ARGS: |
+          --buildtype=debugoptimized
+          -Dctags_path=/app/bin/ctags
+          -Dtcmalloc=true
+          -Dtracing=true
+          -Dhelp=true
+          -Dchannel=flatpak-nightly
+          -Dplugin_deviced=true
+
+nightly:
+  extends: '.publish_nightly'
+  dependencies:
+        - 'flatpak'

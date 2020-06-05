@@ -1,6 +1,6 @@
 /* gbp-create-project-template-icon.h
  *
- * Copyright © 2016 Akshaya Kakkilaya <akshaya.kakkilaya@gmail.com>
+ * Copyright 2016 Akshaya Kakkilaya <akshaya.kakkilaya@gmail.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,12 +14,13 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #pragma once
 
-#include <gtk/gtk.h>
-#include <ide.h>
+#include <libide-projects.h>
 
 G_BEGIN_DECLS
 

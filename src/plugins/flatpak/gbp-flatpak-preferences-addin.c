@@ -1,6 +1,6 @@
 /* gbp-flatpak-preferences-addin.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gbp-flatpak-preferences-addin"
@@ -21,6 +23,7 @@
 
 #include <flatpak.h>
 #include <glib/gi18n.h>
+#include <libide-gui.h>
 
 #include "gbp-flatpak-application-addin.h"
 #include "gbp-flatpak-preferences-addin.h"
@@ -204,7 +207,7 @@ populate_runtimes (GbpFlatpakPreferencesAddin *self,
 }
 
 static void
-gbp_flatpak_preferences_addin_reload_worker (GTask        *task,
+gbp_flatpak_preferences_addin_reload_worker (IdeTask      *task,
                                              gpointer      source_object,
                                              gpointer      task_data,
                                              GCancellable *cancellable)
@@ -212,14 +215,16 @@ gbp_flatpak_preferences_addin_reload_worker (GTask        *task,
   GbpFlatpakPreferencesAddin *self = (GbpFlatpakPreferencesAddin *)source_object;
   g_autoptr(GPtrArray) runtimes = NULL;
   GbpFlatpakApplicationAddin *app_addin;
+  GPtrArray *installations = task_data;
 
   IDE_ENTRY;
 
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
   g_assert (GBP_IS_FLATPAK_PREFERENCES_ADDIN (self));
+  g_assert (installations != NULL);
+  g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
   runtimes = g_ptr_array_new_with_free_func (g_object_unref);
-
   app_addin = gbp_flatpak_application_addin_get_default ();
 
   /*
@@ -228,10 +233,6 @@ gbp_flatpak_preferences_addin_reload_worker (GTask        *task,
    */
   if (app_addin != NULL)
     {
-      g_autoptr(GPtrArray) installations = NULL;
-
-      installations = gbp_flatpak_application_addin_get_installations (app_addin);
-
       for (guint i = 0; i < installations->len; i++)
         {
           FlatpakInstallation *installation = g_ptr_array_index (installations, i);
@@ -241,7 +242,7 @@ gbp_flatpak_preferences_addin_reload_worker (GTask        *task,
       g_ptr_array_sort (runtimes, compare_refs);
     }
 
-  g_task_return_pointer (task, g_steal_pointer (&runtimes), (GDestroyNotify)g_ptr_array_unref);
+  ide_task_return_pointer (task, g_steal_pointer (&runtimes), g_ptr_array_unref);
 
   IDE_EXIT;
 }
@@ -259,9 +260,9 @@ gbp_flatpak_preferences_addin_reload_cb (GObject      *object,
   IDE_ENTRY;
 
   g_assert (GBP_IS_FLATPAK_PREFERENCES_ADDIN (self));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_TASK (result));
 
-  if (NULL == (runtimes = g_task_propagate_pointer (G_TASK (result), &error)))
+  if (NULL == (runtimes = ide_task_propagate_pointer (IDE_TASK (result), &error)))
     {
       g_warning ("%s", error->message);
       IDE_EXIT;
@@ -335,11 +336,14 @@ gbp_flatpak_preferences_addin_reload_cb (GObject      *object,
 static void
 gbp_flatpak_preferences_addin_reload (GbpFlatpakPreferencesAddin *self)
 {
-  g_autoptr(GTask) task = NULL;
+  GbpFlatpakApplicationAddin *addin;
+  g_autoptr(GPtrArray) installations = NULL;
+  g_autoptr(IdeTask) task = NULL;
   guint id;
 
   IDE_ENTRY;
 
+  g_assert (IDE_IS_MAIN_THREAD ());
   g_assert (GBP_IS_FLATPAK_PREFERENCES_ADDIN (self));
   g_assert (DZL_IS_PREFERENCES (self->preferences));
 
@@ -357,9 +361,13 @@ gbp_flatpak_preferences_addin_reload (GbpFlatpakPreferencesAddin *self)
       g_array_remove_range (self->ids, 0, self->ids->len);
     }
 
-  task = g_task_new (self, self->cancellable, gbp_flatpak_preferences_addin_reload_cb, NULL);
-  g_task_set_source_tag (task, gbp_flatpak_preferences_addin_reload);
-  g_task_run_in_thread (task, gbp_flatpak_preferences_addin_reload_worker);
+  addin = gbp_flatpak_application_addin_get_default ();
+  installations = gbp_flatpak_application_addin_get_installations (addin);
+
+  task = ide_task_new (self, self->cancellable, gbp_flatpak_preferences_addin_reload_cb, NULL);
+  ide_task_set_source_tag (task, gbp_flatpak_preferences_addin_reload);
+  ide_task_set_task_data (task, g_steal_pointer (&installations), g_ptr_array_unref);
+  ide_task_run_in_thread (task, gbp_flatpak_preferences_addin_reload_worker);
 
   IDE_EXIT;
 }

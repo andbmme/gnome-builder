@@ -1,6 +1,6 @@
 /* test-gstyle-color-scale.c
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #include <glib.h>
@@ -32,14 +34,19 @@ test_color_scale (void)
 
   gtk_init (NULL, NULL);
 
-  window = gtk_window_new (GTK_WINDOW_TOPLEVEL);
-  gtk_window_set_default_size (GTK_WINDOW (window), 400,100);
+  window = g_object_new (GTK_TYPE_WINDOW,
+                         "type", GTK_WINDOW_TOPLEVEL,
+                         "default-width", 400,
+                         "default-height", 100,
+                         "visible", TRUE,
+                         NULL);
   g_signal_connect (window, "destroy", G_CALLBACK (gtk_main_quit), NULL);
 
   box = g_object_new (GTK_TYPE_BOX,
                       "orientation", GTK_ORIENTATION_HORIZONTAL,
                       "expand", TRUE,
                       "spacing", 1,
+                      "visible", TRUE,
                       NULL);
 
   gtk_container_add (GTK_CONTAINER (window), box);
@@ -51,11 +58,10 @@ test_color_scale (void)
                               "expand", TRUE,
                               "valign", GTK_ALIGN_CENTER,
                               "halign", GTK_ALIGN_FILL,
+                              "visible", TRUE,
                               NULL);
 
   gtk_container_add (GTK_CONTAINER (box), GTK_WIDGET (color_scale));
-
-  gtk_widget_show_all (window);
   gtk_main ();
 }
 

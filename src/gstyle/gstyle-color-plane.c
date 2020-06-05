@@ -2,9 +2,9 @@
  *
  * based on : gtk-color-plane
  *   GTK - The GIMP Toolkit
- *   Copyright © 2012 Red Hat, Inc.
+ *   Copyright 2012 Red Hat, Inc.
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,6 +18,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gstyle-color-plane"
@@ -236,7 +238,7 @@ set_cursor_from_xyz (GstyleColorPlane *self,
   gdouble hsv_h, hsv_s, hsv_v;
   GstyleCielab lab;
   GdkRGBA rgba = {0};
-  gdouble x, y;
+  gdouble x = 0.0, y = 0.0;
 
   g_assert (GSTYLE_IS_COLOR_PLANE (self));
   g_assert (xyz != NULL);
@@ -361,7 +363,7 @@ gstyle_color_plane_set_preferred_unit (GstyleColorPlane *self,
                                        GstyleColorUnit   preferred_unit)
 {
   GstyleColorPlanePrivate *priv = gstyle_color_plane_get_instance_private (self);
-  gdouble max_range;
+  gdouble max_range = 0.0;
 
   g_return_if_fail (GSTYLE_IS_COLOR_PLANE (self));
 
@@ -1261,7 +1263,7 @@ gstyle_color_plane_set_mode (GstyleColorPlane     *self,
 {
   GstyleColorPlanePrivate *priv = gstyle_color_plane_get_instance_private (self);
   gdouble hsv_h, hsv_s, hsv_v;
-  gdouble ref_val;
+  gdouble ref_val = 0.0;
   GstyleCielab lab;
   GdkRGBA rgba = {0};
 
@@ -1345,13 +1347,21 @@ gstyle_color_plane_set_mode (GstyleColorPlane     *self,
 }
 
 static void
+gstyle_color_plane_destroy (GtkWidget *widget)
+{
+  GstyleColorPlane *self = (GstyleColorPlane *)widget;
+  GstyleColorPlanePrivate *priv = gstyle_color_plane_get_instance_private (self);
+
+  gstyle_clear_pointer (&priv->surface, cairo_surface_destroy);
+
+  GTK_WIDGET_CLASS (gstyle_color_plane_parent_class)->destroy (widget);
+}
+
+static void
 gstyle_color_plane_finalize (GObject *object)
 {
   GstyleColorPlane *self = (GstyleColorPlane *)object;
   GstyleColorPlanePrivate *priv = gstyle_color_plane_get_instance_private (self);
-
-  if (priv->surface)
-    cairo_surface_destroy (priv->surface);
 
   g_clear_object (&priv->drag_gesture);
   g_clear_object (&priv->long_press_gesture);
@@ -1450,6 +1460,7 @@ gstyle_color_plane_class_init (GstyleColorPlaneClass *klass)
   widget_class->draw = gstyle_color_plane_draw;
   widget_class->size_allocate = gstyle_color_plane_size_allocate;
   widget_class->key_press_event = gstyle_color_plane_key_press;
+  widget_class->destroy = gstyle_color_plane_destroy;
 
   properties [PROP_MODE] =
     g_param_spec_enum ("mode",

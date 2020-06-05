@@ -1,6 +1,6 @@
 /* ide-clang-completion-provider.h
  *
- * Copyright © 2015 Christian Hergert <christian@hergert.me>
+ * Copyright 2018-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,17 +14,15 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #pragma once
 
-#include <glib-object.h>
-#include <gtksourceview/gtksource.h>
-#include <ide.h>
+#include <libide-code.h>
 
 G_BEGIN_DECLS
-
-#define IDE_CLANG_COMPLETION_PROVIDER_PRIORITY 200
 
 #define IDE_TYPE_CLANG_COMPLETION_PROVIDER (ide_clang_completion_provider_get_type())
 

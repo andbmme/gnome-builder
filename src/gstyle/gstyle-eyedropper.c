@@ -1,6 +1,6 @@
 /* gstyle-eyedropper.c
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 /* This source code is first based on the now deprecated
@@ -32,8 +34,8 @@
 
 #include "gstyle-eyedropper.h"
 
-#define ZOOM_AREA_WIDTH 100
-#define ZOOM_AREA_HEIGHT 100
+#define ZOOM_AREA_WIDTH 200
+#define ZOOM_AREA_HEIGHT 200
 
 /* The spot coords is the oriented distance between the window and the cursor
  * that mean the cursor is never inside the window, this also mean that the cursor
@@ -615,7 +617,6 @@ static void
 gstyle_eyedropper_set_source_event (GstyleEyedropper *self,
                                     GdkEvent         *event)
 {
-  GtkWidget *source;
   GtkStyleContext *context;
   GdkRectangle monitor_rect;
   GtkWidget *box;
@@ -628,23 +629,31 @@ gstyle_eyedropper_set_source_event (GstyleEyedropper *self,
   g_return_if_fail (event != NULL);
 
   self->seat = g_object_ref (gdk_event_get_seat (event));
-  source = gtk_get_event_widget (event);
   self->screen = gdk_event_get_screen (event);
   g_signal_connect_swapped (self->screen,
                             "size-changed",
                             G_CALLBACK (gstyle_eyedropper_screen_size_changed_cb),
                             self);
 
-  self->window = g_object_ref_sink (gtk_window_new (GTK_WINDOW_POPUP));
+  self->window = g_object_ref_sink (g_object_new (GTK_TYPE_WINDOW,
+                                                  "type", GTK_WINDOW_POPUP,
+                                                  "visible", TRUE,
+                                                  NULL));
   gtk_window_set_screen (GTK_WINDOW (self->window),self->screen);
   gtk_widget_set_name (self->window, "gstyleeyedropper");
   context = gtk_widget_get_style_context (self->window);
   self->default_provider = gstyle_css_provider_init_default (gtk_style_context_get_screen (context));
 
-  box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
+  box = g_object_new (GTK_TYPE_BOX,
+                      "orientation", GTK_ORIENTATION_VERTICAL,
+                      "spacing", 6,
+                      "visible", TRUE,
+                      NULL);
   gtk_container_add (GTK_CONTAINER (self->window), box);
 
-  self->zoom_area = gtk_drawing_area_new ();
+  self->zoom_area = g_object_new (GTK_TYPE_DRAWING_AREA,
+                                  "visible", TRUE,
+                                  NULL);
   gtk_widget_set_size_request (self->zoom_area, ZOOM_AREA_WIDTH, ZOOM_AREA_HEIGHT);
   gtk_container_add (GTK_CONTAINER (box), self->zoom_area);
 
@@ -652,6 +661,7 @@ gstyle_eyedropper_set_source_event (GstyleEyedropper *self,
                          "fallback-name-kind", GSTYLE_COLOR_KIND_RGB_HEX6,
                          "fallback-name-visible", TRUE,
                          "color", self->color,
+                         "visible", TRUE,
                          NULL);
   gtk_container_add (GTK_CONTAINER (box), swatch);
 
@@ -672,15 +682,14 @@ gstyle_eyedropper_set_source_event (GstyleEyedropper *self,
       gtk_window_move (GTK_WINDOW (self->window), x, y);
     }
 
-  gtk_widget_show_all (self->window);
-
   gtk_widget_add_events (self->window,
                          GDK_BUTTON_RELEASE_MASK | GDK_BUTTON_PRESS_MASK | GDK_POINTER_MOTION_MASK);
 
   self->cursor = gdk_cursor_new_from_name (gdk_screen_get_display (self->screen), "cell");
+
   gtk_grab_add (self->window);
   status = gdk_seat_grab (self->seat,
-                          gtk_widget_get_window (source),
+                          gtk_widget_get_window (self->window),
                           GDK_SEAT_CAPABILITY_ALL,
                           FALSE,
                           self->cursor,

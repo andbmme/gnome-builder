@@ -1,6 +1,6 @@
 /* ide-code-index-search-provider.c
  *
- * Copyright © 2017 Anoop Chandu <anoopchandu96@gmail.com>
+ * Copyright 2017 Anoop Chandu <anoopchandu96@gmail.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,13 +14,18 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "ide-code-index-search-provider"
 
+#include <libide-code.h>
+#include <libide-foundry.h>
+
 #include "ide-code-index-search-provider.h"
-#include "ide-code-index-service.h"
 #include "ide-code-index-index.h"
+#include "gbp-code-index-service.h"
 
 static void
 populate_cb (GObject      *object,
@@ -28,22 +33,22 @@ populate_cb (GObject      *object,
              gpointer      user_data)
 {
   IdeCodeIndexIndex *index = (IdeCodeIndexIndex *)object;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GPtrArray) results = NULL;
   g_autoptr(GError) error = NULL;
 
   g_assert (IDE_IS_CODE_INDEX_INDEX (index));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   results = ide_code_index_index_populate_finish (index, result, &error);
 
   if (results != NULL)
-    g_task_return_pointer (task,
-                           g_steal_pointer (&results),
-                           (GDestroyNotify)g_ptr_array_unref);
+    ide_task_return_pointer (task,
+                             g_steal_pointer (&results),
+                             g_ptr_array_unref);
   else
-    g_task_return_error (task, g_steal_pointer (&error));
+    ide_task_return_error (task, g_steal_pointer (&error));
 }
 
 static void
@@ -55,8 +60,8 @@ ide_code_index_search_provider_search_async (IdeSearchProvider   *provider,
                                              gpointer             user_data)
 {
   IdeCodeIndexSearchProvider *self = (IdeCodeIndexSearchProvider *)provider;
-  g_autoptr(GTask) task = NULL;
-  IdeCodeIndexService *service;
+  GbpCodeIndexService *service = NULL;
+  g_autoptr(IdeTask) task = NULL;
   IdeCodeIndexIndex *index;
   IdeContext *context;
 
@@ -70,22 +75,33 @@ ide_code_index_search_provider_search_async (IdeSearchProvider   *provider,
   context = ide_object_get_context (IDE_OBJECT (self));
   g_assert (IDE_IS_CONTEXT (context));
 
-  service = ide_context_get_service_typed (context, IDE_TYPE_CODE_INDEX_SERVICE);
-  g_assert (IDE_IS_CODE_INDEX_SERVICE (service));
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, ide_code_index_search_provider_search_async);
 
-  index = ide_code_index_service_get_index (service);
-  g_assert (IDE_IS_CODE_INDEX_INDEX (index));
+  if (!ide_context_has_project (context) ||
+      !(service = gbp_code_index_service_from_context (context)))
+    {
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_NOT_SUPPORTED,
+                                 "Code index requires a project");
+      IDE_EXIT;
+    }
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, ide_code_index_search_provider_search_async);
-  g_task_set_priority (task, G_PRIORITY_LOW);
+  index = gbp_code_index_service_get_index (service);
 
-  ide_code_index_index_populate_async (index,
-                                       search_terms,
-                                       max_results,
-                                       cancellable,
-                                       populate_cb,
-                                       g_steal_pointer (&task));
+  if (index == NULL)
+    ide_task_return_new_error (task,
+                               G_IO_ERROR,
+                               G_IO_ERROR_NOT_SUPPORTED,
+                               "Code index is not currently available");
+  else
+    ide_code_index_index_populate_async (index,
+                                         search_terms,
+                                         max_results,
+                                         cancellable,
+                                         populate_cb,
+                                         g_steal_pointer (&task));
 
   IDE_EXIT;
 }
@@ -101,11 +117,11 @@ ide_code_index_search_provider_search_finish (IdeSearchProvider *provider,
 
   g_return_val_if_fail (IDE_IS_MAIN_THREAD (), NULL);
   g_return_val_if_fail (IDE_IS_CODE_INDEX_SEARCH_PROVIDER (provider), NULL);
-  g_return_val_if_fail (G_IS_TASK (result), NULL);
+  g_return_val_if_fail (IDE_IS_TASK (result), NULL);
 
-  ar = g_task_propagate_pointer (G_TASK (result), error);
+  ar = ide_task_propagate_pointer (IDE_TASK (result), error);
 
-  IDE_RETURN (ar);
+  IDE_RETURN (IDE_PTR_ARRAY_STEAL_FULL (&ar));
 }
 
 static void

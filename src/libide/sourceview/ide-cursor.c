@@ -1,6 +1,6 @@
 /* ide-cursor.c
  *
- * Copyright © 2017 Anoop Chandu <anoopchandu96@gmail.com>
+ * Copyright 2017 Anoop Chandu <anoopchandu96@gmail.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,15 +14,19 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "ide-cursor"
 
+#include "config.h"
+
 #include <dazzle.h>
 
-#include "sourceview/ide-source-view.h"
-#include "sourceview/ide-cursor.h"
-#include "sourceview/ide-text-util.h"
+#include "ide-source-view.h"
+#include "ide-cursor.h"
+#include "ide-text-util.h"
 
 struct _IdeCursor
 {
@@ -82,7 +86,7 @@ ide_cursor_dispose (GObject *object)
       if (self->highlight_tag != NULL)
         gtk_text_tag_table_remove (gtk_text_buffer_get_tag_table (buffer),
                                    self->highlight_tag);
-      dzl_clear_weak_pointer (&self->source_view);
+      g_clear_weak_pointer (&self->source_view);
     }
 
   if (self->operations_signals != NULL)
@@ -345,8 +349,8 @@ ide_cursor_add_cursor_by_match (IdeCursor *self)
   if (g_strcmp0 (gtk_source_search_settings_get_search_text (search_settings), text) != 0)
     gtk_source_search_settings_set_search_text (search_settings, text);
 
-  if (!gtk_source_search_context_forward2 (search_context, &end,
-                                           &match_begin, &match_end, &has_wrapped_around))
+  if (!gtk_source_search_context_forward (search_context, &end,
+                                          &match_begin, &match_end, &has_wrapped_around))
     return;
 
   if (self->cursors == NULL)
@@ -770,7 +774,7 @@ ide_cursor_set_property (GObject      *object,
   switch (prop_id)
     {
     case PROP_IDE_SOURCE_VIEW:
-      dzl_set_weak_pointer (&self->source_view, g_value_get_object (value));
+      g_set_weak_pointer (&self->source_view, g_value_get_object (value));
       break;
 
     default:

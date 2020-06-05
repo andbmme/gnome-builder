@@ -26,9 +26,9 @@ You may also chooser to implement extensions in C or Vala.
    keybindings
    langserv
    search
+   session
    menus
    preferences
-   transfers
    workers
    vcs
 

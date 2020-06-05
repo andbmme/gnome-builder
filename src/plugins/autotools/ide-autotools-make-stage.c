@@ -1,6 +1,6 @@
 /* ide-autotools-make-stage.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "ide-autotools-make-stage"
@@ -22,7 +24,7 @@
 
 struct _IdeAutotoolsMakeStage
 {
-  IdeBuildStage  parent;
+  IdePipelineStage  parent;
 
   /*
    * If we discover "gmake", then this will be "gmake". If it is NULL then we
@@ -37,14 +39,14 @@ struct _IdeAutotoolsMakeStage
 
   /*
    * This is our primary build target. It will be run during the normal
-   * execute_async()/execute_finish() pair.
+   * build_async()/build_finish() pair.
    */
   gchar *target;
 
   /*
    * This is our chained build target. It is set if we found that we could
    * coallesce with the next build stage during pipeline execution.  It is
-   * cleared during execute_async() so that supplimental executions are
+   * cleared during build_async() so that supplimental executions are
    * unaffected.
    */
   gchar *chained_target;
@@ -70,13 +72,13 @@ enum {
   N_PROPS
 };
 
-G_DEFINE_TYPE (IdeAutotoolsMakeStage, ide_autotools_make_stage, IDE_TYPE_BUILD_STAGE)
+G_DEFINE_TYPE (IdeAutotoolsMakeStage, ide_autotools_make_stage, IDE_TYPE_PIPELINE_STAGE)
 
 static GParamSpec *properties [N_PROPS];
 
 static IdeSubprocessLauncher *
 create_launcher (IdeAutotoolsMakeStage  *self,
-                 IdeBuildPipeline       *pipeline,
+                 IdePipeline       *pipeline,
                  GCancellable           *cancellable,
                  const gchar            *make_target,
                  GError                **error)
@@ -84,14 +86,14 @@ create_launcher (IdeAutotoolsMakeStage  *self,
   g_autoptr(IdeSubprocessLauncher) launcher = NULL;
 
   g_assert (IDE_IS_AUTOTOOLS_MAKE_STAGE (self));
-  g_assert (IDE_IS_BUILD_PIPELINE (pipeline));
+  g_assert (IDE_IS_PIPELINE (pipeline));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
   g_assert (make_target != NULL);
 
   if (self->make == NULL)
     {
-      IdeConfiguration *config = ide_build_pipeline_get_configuration (pipeline);
-      IdeRuntime *runtime = ide_configuration_get_runtime (config);
+      IdeConfig *config = ide_pipeline_get_config (pipeline);
+      IdeRuntime *runtime = ide_config_get_runtime (config);
 
       if (ide_runtime_contains_program_in_path (runtime, "gmake", cancellable))
         self->make = "gmake";
@@ -99,7 +101,7 @@ create_launcher (IdeAutotoolsMakeStage  *self,
         self->make = "make";
     }
 
-  if (NULL == (launcher = ide_build_pipeline_create_launcher (pipeline, error)))
+  if (NULL == (launcher = ide_pipeline_create_launcher (pipeline, error)))
     return NULL;
 
   ide_subprocess_launcher_set_flags (launcher,
@@ -138,9 +140,9 @@ create_launcher (IdeAutotoolsMakeStage  *self,
    */
   if (dzl_str_equal0 ("all", make_target))
     {
-      ide_subprocess_launcher_setenv (launcher, "LANG", "C", TRUE);
-      ide_subprocess_launcher_setenv (launcher, "LC_ALL", "C", TRUE);
-      ide_subprocess_launcher_setenv (launcher, "LC_MESSAGES", "C", TRUE);
+      ide_subprocess_launcher_setenv (launcher, "LANG", "C.UTF-8", TRUE);
+      ide_subprocess_launcher_setenv (launcher, "LC_ALL", "C.UTF-8", TRUE);
+      ide_subprocess_launcher_setenv (launcher, "LC_MESSAGES", "C.UTF-8", TRUE);
     }
 
   return g_steal_pointer (&launcher);
@@ -152,7 +154,7 @@ ide_autotools_make_stage_wait_cb (GObject      *object,
                                   gpointer      user_data)
 {
   IdeSubprocess *subprocess = (IdeSubprocess *)object;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
 
   IDE_ENTRY;
@@ -161,16 +163,16 @@ ide_autotools_make_stage_wait_cb (GObject      *object,
   g_assert (G_IS_ASYNC_RESULT (result));
 
   if (!ide_subprocess_wait_check_finish (subprocess, result, &error))
-    g_task_return_error (task, g_steal_pointer (&error));
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
-    g_task_return_boolean (task, TRUE);
+    ide_task_return_boolean (task, TRUE);
 
   IDE_EXIT;
 }
 
 static void
-ide_autotools_make_stage_execute_async (IdeBuildStage       *stage,
-                                        IdeBuildPipeline    *pipeline,
+ide_autotools_make_stage_build_async (IdePipelineStage       *stage,
+                                        IdePipeline    *pipeline,
                                         GCancellable        *cancellable,
                                         GAsyncReadyCallback  callback,
                                         gpointer             user_data)
@@ -178,7 +180,7 @@ ide_autotools_make_stage_execute_async (IdeBuildStage       *stage,
   IdeAutotoolsMakeStage *self = (IdeAutotoolsMakeStage *)stage;
   g_autoptr(IdeSubprocessLauncher) launcher = NULL;
   g_autoptr(IdeSubprocess) subprocess = NULL;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autoptr(GError) error = NULL;
   g_autofree gchar *message = NULL;
   const gchar * const *argv;
@@ -187,11 +189,11 @@ ide_autotools_make_stage_execute_async (IdeBuildStage       *stage,
   IDE_ENTRY;
 
   g_assert (IDE_IS_AUTOTOOLS_MAKE_STAGE (self));
-  g_assert (IDE_IS_BUILD_PIPELINE (pipeline));
+  g_assert (IDE_IS_PIPELINE (pipeline));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, ide_autotools_make_stage_execute_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, ide_autotools_make_stage_build_async);
 
   /* If we have a chained target, we just execute that instead */
   if (self->chained_target)
@@ -202,7 +204,7 @@ ide_autotools_make_stage_execute_async (IdeBuildStage       *stage,
   if (target == NULL)
     {
       g_warning ("Improperly configured IdeAutotoolsMakeStage, no target set");
-      g_task_return_boolean (task, TRUE);
+      ide_task_return_boolean (task, TRUE);
       IDE_EXIT;
     }
 
@@ -210,7 +212,7 @@ ide_autotools_make_stage_execute_async (IdeBuildStage       *stage,
 
   if (launcher == NULL)
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       IDE_EXIT;
     }
 
@@ -220,17 +222,17 @@ ide_autotools_make_stage_execute_async (IdeBuildStage       *stage,
   /* Log the process arguments to stdout */
   argv = ide_subprocess_launcher_get_argv (launcher);
   message = g_strjoinv (" ", (gchar **)argv);
-  ide_build_stage_log (stage, IDE_BUILD_LOG_STDOUT, message, -1);
+  ide_pipeline_stage_log (stage, IDE_BUILD_LOG_STDOUT, message, -1);
 
   subprocess = ide_subprocess_launcher_spawn (launcher, cancellable, &error);
 
   if (subprocess == NULL)
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       IDE_EXIT;
     }
 
-  ide_build_stage_log_subprocess (stage, subprocess);
+  ide_pipeline_stage_log_subprocess (stage, subprocess);
 
   ide_subprocess_wait_check_async (subprocess,
                                    cancellable,
@@ -241,7 +243,7 @@ ide_autotools_make_stage_execute_async (IdeBuildStage       *stage,
 }
 
 static gboolean
-ide_autotools_make_stage_execute_finish (IdeBuildStage  *stage,
+ide_autotools_make_stage_build_finish (IdePipelineStage  *stage,
                                          GAsyncResult   *result,
                                          GError        **error)
 {
@@ -249,17 +251,17 @@ ide_autotools_make_stage_execute_finish (IdeBuildStage  *stage,
 
   IDE_ENTRY;
 
-  g_assert (IDE_IS_BUILD_STAGE (stage));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_PIPELINE_STAGE (stage));
+  g_assert (IDE_IS_TASK (result));
 
-  ret = g_task_propagate_boolean (G_TASK (result), error);
+  ret = ide_task_propagate_boolean (IDE_TASK (result), error);
 
   IDE_RETURN (ret);
 }
 
 static void
-ide_autotools_make_stage_clean_async (IdeBuildStage       *stage,
-                                      IdeBuildPipeline    *pipeline,
+ide_autotools_make_stage_clean_async (IdePipelineStage       *stage,
+                                      IdePipeline    *pipeline,
                                       GCancellable        *cancellable,
                                       GAsyncReadyCallback  callback,
                                       gpointer             user_data)
@@ -267,7 +269,7 @@ ide_autotools_make_stage_clean_async (IdeBuildStage       *stage,
   IdeAutotoolsMakeStage *self = (IdeAutotoolsMakeStage *)stage;
   g_autoptr(IdeSubprocessLauncher) launcher = NULL;
   g_autoptr(IdeSubprocess) subprocess = NULL;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autoptr(GError) error = NULL;
   g_autofree gchar *message = NULL;
   const gchar * const *argv;
@@ -275,15 +277,15 @@ ide_autotools_make_stage_clean_async (IdeBuildStage       *stage,
   IDE_ENTRY;
 
   g_assert (IDE_IS_AUTOTOOLS_MAKE_STAGE (self));
-  g_assert (IDE_IS_BUILD_PIPELINE (pipeline));
+  g_assert (IDE_IS_PIPELINE (pipeline));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, ide_autotools_make_stage_clean_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, ide_autotools_make_stage_clean_async);
 
   if (self->clean_target == NULL)
     {
-      g_task_return_boolean (task, TRUE);
+      ide_task_return_boolean (task, TRUE);
       IDE_EXIT;
     }
 
@@ -291,24 +293,24 @@ ide_autotools_make_stage_clean_async (IdeBuildStage       *stage,
 
   if (launcher == NULL)
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       IDE_EXIT;
     }
 
   /* Log the process arguments to stdout */
   argv = ide_subprocess_launcher_get_argv (launcher);
   message = g_strjoinv (" ", (gchar **)argv);
-  ide_build_stage_log (stage, IDE_BUILD_LOG_STDOUT, message, -1);
+  ide_pipeline_stage_log (stage, IDE_BUILD_LOG_STDOUT, message, -1);
 
   subprocess = ide_subprocess_launcher_spawn (launcher, cancellable, &error);
 
   if (subprocess == NULL)
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       IDE_EXIT;
     }
 
-  ide_build_stage_log_subprocess (stage, subprocess);
+  ide_pipeline_stage_log_subprocess (stage, subprocess);
 
   ide_subprocess_wait_check_async (subprocess,
                                    cancellable,
@@ -319,7 +321,7 @@ ide_autotools_make_stage_clean_async (IdeBuildStage       *stage,
 }
 
 static gboolean
-ide_autotools_make_stage_clean_finish (IdeBuildStage  *stage,
+ide_autotools_make_stage_clean_finish (IdePipelineStage  *stage,
                                        GAsyncResult   *result,
                                        GError        **error)
 {
@@ -327,39 +329,40 @@ ide_autotools_make_stage_clean_finish (IdeBuildStage  *stage,
 
   IDE_ENTRY;
 
-  g_assert (IDE_IS_BUILD_STAGE (stage));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_PIPELINE_STAGE (stage));
+  g_assert (IDE_IS_TASK (result));
 
-  ret = g_task_propagate_boolean (G_TASK (result), error);
+  ret = ide_task_propagate_boolean (IDE_TASK (result), error);
 
   IDE_RETURN (ret);
 }
 
 static void
-ide_autotools_make_stage_query (IdeBuildStage    *stage,
-                                IdeBuildPipeline *pipeline,
+ide_autotools_make_stage_query (IdePipelineStage    *stage,
+                                IdePipeline *pipeline,
+                                GPtrArray        *targets,
                                 GCancellable     *cancellable)
 {
   IDE_ENTRY;
 
   g_return_if_fail (IDE_IS_AUTOTOOLS_MAKE_STAGE (stage));
-  g_return_if_fail (IDE_IS_BUILD_PIPELINE (pipeline));
+  g_return_if_fail (IDE_IS_PIPELINE (pipeline));
   g_return_if_fail (!cancellable || G_IS_CANCELLABLE (cancellable));
 
   /* We always defer to make for completed state */
-  ide_build_stage_set_completed (stage, FALSE);
+  ide_pipeline_stage_set_completed (stage, FALSE);
 
   IDE_EXIT;
 }
 
 static gboolean
-ide_autotools_make_stage_chain (IdeBuildStage *stage,
-                                IdeBuildStage *next)
+ide_autotools_make_stage_chain (IdePipelineStage *stage,
+                                IdePipelineStage *next)
 {
   IdeAutotoolsMakeStage *self = (IdeAutotoolsMakeStage *)stage;
 
   g_assert (IDE_IS_AUTOTOOLS_MAKE_STAGE (self));
-  g_assert (IDE_IS_BUILD_STAGE (next));
+  g_assert (IDE_IS_PIPELINE_STAGE (next));
 
   if (IDE_IS_AUTOTOOLS_MAKE_STAGE (next))
     {
@@ -450,14 +453,14 @@ static void
 ide_autotools_make_stage_class_init (IdeAutotoolsMakeStageClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
-  IdeBuildStageClass *build_stage_class = IDE_BUILD_STAGE_CLASS (klass);
+  IdePipelineStageClass *build_stage_class = IDE_PIPELINE_STAGE_CLASS (klass);
 
   object_class->finalize = ide_autotools_make_stage_finalize;
   object_class->get_property = ide_autotools_make_stage_get_property;
   object_class->set_property = ide_autotools_make_stage_set_property;
 
-  build_stage_class->execute_async = ide_autotools_make_stage_execute_async;
-  build_stage_class->execute_finish = ide_autotools_make_stage_execute_finish;
+  build_stage_class->build_async = ide_autotools_make_stage_build_async;
+  build_stage_class->build_finish = ide_autotools_make_stage_build_finish;
   build_stage_class->clean_async = ide_autotools_make_stage_clean_async;
   build_stage_class->clean_finish = ide_autotools_make_stage_clean_finish;
   build_stage_class->query = ide_autotools_make_stage_query;

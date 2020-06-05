@@ -1,6 +1,6 @@
 /* gbp-todo-model.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,11 +14,14 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gbp-todo-model"
 
-#include <ide.h>
+#include <libide-code.h>
+#include <libide-gui.h>
 #include <string.h>
 
 #include "gbp-todo-model.h"
@@ -43,6 +46,13 @@ struct _GbpTodoModel {
 
 typedef struct
 {
+  GFile *file;
+  GFile *workdir;
+  guint use_git_grep : 1;
+} Mine;
+
+typedef struct
+{
   GbpTodoModel *self;
   GPtrArray    *items;
 } ResultInfo;
@@ -64,11 +74,22 @@ static const gchar *exclude_dirs[] = {
   ".flatpak-builder",
   ".git",
   ".svn",
+  "node_modules",
 };
 
+/* This is an optimization to avoid reading files in from disk that
+ * we know we'll discard, rather than wait until we query the IdeVcs
+ * for that information.
+ */
 static const gchar *exclude_files[] = {
+  "*~",
+  "*.swp",
   "*.m4",
   "*.po",
+  "*.min.js.*",
+  "*.min.js",
+  "configure",
+  "Makecache",
 };
 
 static const gchar *keywords[] = {
@@ -77,6 +98,14 @@ static const gchar *keywords[] = {
   "TODO",
   "HACK",
 };
+
+static void
+mine_free (Mine *m)
+{
+  g_clear_object (&m->file);
+  g_clear_object (&m->workdir);
+  g_slice_free (Mine, m);
+}
 
 static void
 result_info_free (gpointer data)
@@ -244,11 +273,11 @@ gbp_todo_model_class_init (GbpTodoModelClass *klass)
 
   g_object_class_install_properties (object_class, N_PROPS, properties);
 
-  line1 = g_regex_new ("(.*):(\\d+):(.*)", 0, 0, &error);
+  line1 = g_regex_new ("([a-zA-Z0-9@\\+\\-\\.\\/_]+):(\\d+):(.*)", 0, 0, &error);
   g_assert_no_error (error);
   g_assert (line1 != NULL);
 
-  line2 = g_regex_new ("(.*)-(\\d+)-(.*)", 0, 0, &error);
+  line2 = g_regex_new ("([a-zA-Z0-9@\\+\\-\\.\\/_]+)-(\\d+)-(.*)", 0, 0, &error);
   g_assert_no_error (error);
   g_assert (line2 != NULL);
 }
@@ -271,7 +300,7 @@ gbp_todo_model_init (GbpTodoModel *self)
  *
  * Returns: (transfer full): A newly created #GbpTodoModel.
  *
- * Since: 3.26
+ * Since: 3.32
  */
 GbpTodoModel *
 gbp_todo_model_new (IdeVcs *vcs)
@@ -282,7 +311,7 @@ gbp_todo_model_new (IdeVcs *vcs)
 }
 
 static void
-gbp_todo_model_mine_worker (GTask        *task,
+gbp_todo_model_mine_worker (IdeTask      *task,
                             gpointer      source_object,
                             gpointer      task_data,
                             GCancellable *cancellable)
@@ -294,53 +323,81 @@ gbp_todo_model_mine_worker (GTask        *task,
   g_autoptr(GbpTodoItem) item = NULL;
   g_autoptr(GBytes) bytes = NULL;
   g_autoptr(GTimer) timer = g_timer_new ();
-  g_autofree gchar *path = NULL;
+  g_autofree gchar *workpath = NULL;
   GbpTodoModel *self = source_object;
+  Mine *m = task_data;
   IdeLineReader reader;
   ResultInfo *info;
   gchar *stdoutstr = NULL;
-  GFile *file = task_data;
   gchar *line;
+  gsize pathlen = 0;
   gsize stdoutstr_len;
-  gsize pathlen;
   gsize len;
 
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
   g_assert (GBP_IS_TODO_MODEL (self));
-  g_assert (G_IS_FILE (file));
+  g_assert (m != NULL);
+  g_assert (G_IS_FILE (m->file));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
   launcher = ide_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE);
 
+  if (!(workpath = g_file_get_path (m->workdir)))
+    {
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_NOT_SUPPORTED,
+                                 "Cannot run on non-native file-systems");
+      return;
+    }
+
+  pathlen = strlen (workpath);
+  ide_subprocess_launcher_set_cwd (launcher, workpath);
+
+  if (m->use_git_grep)
+    {
+      ide_subprocess_launcher_push_argv (launcher, "git");
+      ide_subprocess_launcher_push_argv (launcher, "grep");
+    }
+  else
+    {
 #ifdef __FreeBSD__
-  ide_subprocess_launcher_push_argv (launcher, "bsdgrep");
+      ide_subprocess_launcher_push_argv (launcher, "bsdgrep");
 #else
-  ide_subprocess_launcher_push_argv (launcher, "grep");
+      ide_subprocess_launcher_push_argv (launcher, "grep");
 #endif
+    }
+
   ide_subprocess_launcher_push_argv (launcher, "-A");
   ide_subprocess_launcher_push_argv (launcher, "5");
   ide_subprocess_launcher_push_argv (launcher, "-I");
   ide_subprocess_launcher_push_argv (launcher, "-H");
   ide_subprocess_launcher_push_argv (launcher, "-n");
-  ide_subprocess_launcher_push_argv (launcher, "-r");
+
+  if (!m->use_git_grep)
+    ide_subprocess_launcher_push_argv (launcher, "-r");
+
   ide_subprocess_launcher_push_argv (launcher, "-E");
 
-  for (guint i = 0; i < G_N_ELEMENTS (exclude_files); i++)
+  if (!m->use_git_grep)
     {
-      const gchar *exclude_file = exclude_files[i];
-      g_autofree gchar *arg = NULL;
+      for (guint i = 0; i < G_N_ELEMENTS (exclude_files); i++)
+        {
+          const gchar *exclude_file = exclude_files[i];
+          g_autofree gchar *arg = NULL;
 
-      arg = g_strdup_printf ("--exclude=%s", exclude_file);
-      ide_subprocess_launcher_push_argv (launcher, arg);
-    }
+          arg = g_strdup_printf ("--exclude=%s", exclude_file);
+          ide_subprocess_launcher_push_argv (launcher, arg);
+        }
 
-  for (guint i = 0; i < G_N_ELEMENTS (exclude_dirs); i++)
-    {
-      const gchar *exclude_dir = exclude_dirs[i];
-      g_autofree gchar *arg = NULL;
+      for (guint i = 0; i < G_N_ELEMENTS (exclude_dirs); i++)
+        {
+          const gchar *exclude_dir = exclude_dirs[i];
+          g_autofree gchar *arg = NULL;
 
-      arg = g_strdup_printf ("--exclude-dir=%s", exclude_dir);
-      ide_subprocess_launcher_push_argv (launcher, arg);
+          arg = g_strdup_printf ("--exclude-dir=%s", exclude_dir);
+          ide_subprocess_launcher_push_argv (launcher, arg);
+        }
     }
 
   for (guint i = 0; i < G_N_ELEMENTS (keywords); i++)
@@ -351,24 +408,41 @@ gbp_todo_model_mine_worker (GTask        *task,
       arg = g_strdup_printf ("%s(:| )", keyword);
       ide_subprocess_launcher_push_argv (launcher, "-e");
       ide_subprocess_launcher_push_argv (launcher, arg);
+
+      if (m->use_git_grep)
+        {
+          /* Avoid pathological lines up front before reading them into
+           * the UI process memory space.
+           *
+           * Note that we do this *after* our TODO: match because it causes
+           * grep to have to look at every line up to it. So to do this in
+           * reverse order is incredibly slow.
+           */
+          ide_subprocess_launcher_push_argv (launcher, "--and");
+          ide_subprocess_launcher_push_argv (launcher, "-e");
+          ide_subprocess_launcher_push_argv (launcher, "^.{0,256}$");
+        }
     }
 
-  /* Let grep know where to scan */
-  path = g_file_get_path (file);
-  pathlen = strlen (path);
-  ide_subprocess_launcher_push_argv (launcher, path);
+  if (g_file_query_file_type (m->file, 0, NULL) != G_FILE_TYPE_DIRECTORY)
+    {
+      g_autofree gchar *path = NULL;
+
+      path = g_file_get_path (m->workdir);
+      ide_subprocess_launcher_push_argv (launcher, path);
+    }
 
   /* Spawn our grep process */
   if (NULL == (subprocess = ide_subprocess_launcher_spawn (launcher, cancellable, &error)))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
   /* Read all of the output into a giant string */
   if (!ide_subprocess_communicate_utf8 (subprocess, NULL, NULL, &stdoutstr, NULL, &error))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
@@ -405,24 +479,37 @@ gbp_todo_model_mine_worker (GTask        *task,
         {
           if (item != NULL)
             {
-              const gchar *pathstr = gbp_todo_item_get_path (item);
-
-              /*
-               * self->vcs is only set at construction, so safe to
-               * access via a worker thread. ide_vcs_path_is_ignored()
-               * is expected to be thread-safe as well.
-               */
-              if (!ide_vcs_path_is_ignored (self->vcs, pathstr, NULL))
-                g_ptr_array_add (items, g_steal_pointer (&item));
+              if (m->use_git_grep)
+                {
+                  g_ptr_array_add (items, g_steal_pointer (&item));
+                }
               else
-                g_clear_object (&item);
+                {
+                  const gchar *pathstr = gbp_todo_item_get_path (item);
+
+                  /*
+                   * self->vcs is only set at construction, so safe to
+                   * access via a worker thread. ide_vcs_path_is_ignored()
+                   * is expected to be thread-safe as well.
+                   */
+                  if (!ide_vcs_path_is_ignored (self->vcs, pathstr, NULL))
+                    g_ptr_array_add (items, g_steal_pointer (&item));
+                  else
+                    g_clear_object (&item);
+                }
             }
 
           continue;
         }
 
-      if (dzl_str_empty0 (line))
-        continue;
+      if (dzl_str_empty0 (line) || len > 256)
+        {
+          /* cancel anything if the line is too long so that we don't get into
+           * pathological cases.
+           */
+          g_clear_object (&item);
+          continue;
+        }
 
       /* Try to match the first line */
       if (item == NULL)
@@ -442,12 +529,7 @@ gbp_todo_model_mine_worker (GTask        *task,
                   line[end] = '\0';
                   pathstr = &line[begin];
 
-                  /*
-                   * Try to skip past the prefix of the working directory
-                   * of the project.
-                   */
-
-                  if (strncmp (pathstr, path, pathlen) == 0)
+                  if (pathlen == 0 || strncmp (workpath, pathstr, pathlen) == 0)
                     {
                       pathstr += pathlen;
 
@@ -495,6 +577,29 @@ gbp_todo_model_mine_worker (GTask        *task,
         }
     }
 
+  /* We might have a trailing item w/o final -- */
+  if (item != NULL)
+    {
+      if (m->use_git_grep)
+        {
+          g_ptr_array_add (items, g_steal_pointer (&item));
+        }
+      else
+        {
+          const gchar *pathstr = gbp_todo_item_get_path (item);
+
+          /*
+           * self->vcs is only set at construction, so safe to
+           * access via a worker thread. ide_vcs_path_is_ignored()
+           * is expected to be thread-safe as well.
+           */
+          if (!ide_vcs_path_is_ignored (self->vcs, pathstr, NULL))
+            g_ptr_array_add (items, g_steal_pointer (&item));
+          else
+            g_clear_object (&item);
+        }
+    }
+
   g_debug ("Located %u TODO items in %0.4lf seconds",
            items->len, g_timer_elapsed (timer, NULL));
 
@@ -506,7 +611,14 @@ gbp_todo_model_mine_worker (GTask        *task,
                              gbp_todo_model_merge_results,
                              info, result_info_free);
 
-  g_task_return_boolean (task, TRUE);
+  ide_task_return_boolean (task, TRUE);
+}
+
+static gboolean
+is_typed (IdeVcs      *vcs,
+          const gchar *name)
+{
+  return g_strcmp0 (G_OBJECT_TYPE_NAME (vcs), name) == 0;
 }
 
 /**
@@ -526,7 +638,7 @@ gbp_todo_model_mine_worker (GTask        *task,
  * If @file is not a native file (meaning it is accessable on the
  * normal, mounted, local file-system) this operation will fail.
  *
- * Since: 3.26
+ * Since: 3.32
  */
 void
 gbp_todo_model_mine_async (GbpTodoModel        *self,
@@ -535,27 +647,37 @@ gbp_todo_model_mine_async (GbpTodoModel        *self,
                            GAsyncReadyCallback  callback,
                            gpointer             user_data)
 {
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
+  GFile *workdir;
+  Mine *m;
 
   g_return_if_fail (GBP_IS_TODO_MODEL (self));
   g_return_if_fail (G_IS_FILE (file));
   g_return_if_fail (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_priority (task, G_PRIORITY_LOW + 100);
-  g_task_set_source_tag (task, gbp_todo_model_mine_async);
-  g_task_set_task_data (task, g_object_ref (file), g_object_unref);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_priority (task, G_PRIORITY_LOW + 100);
+  ide_task_set_source_tag (task, gbp_todo_model_mine_async);
+  ide_task_set_kind (task, IDE_TASK_KIND_INDEXER);
 
   if (!g_file_is_native (file))
     {
-      g_task_return_new_error (task,
-                               G_IO_ERROR,
-                               G_IO_ERROR_NOT_SUPPORTED,
-                               "Only local files are supported");
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_NOT_SUPPORTED,
+                                 "Only local files are supported");
       return;
     }
 
-  g_task_run_in_thread (task, gbp_todo_model_mine_worker);
+  workdir = ide_vcs_get_workdir (self->vcs);
+
+  m = g_slice_new0 (Mine);
+  m->file = g_object_ref (file);
+  m->workdir = g_object_ref (workdir);
+  m->use_git_grep = is_typed (self->vcs, "IdeGitVcs");
+  ide_task_set_task_data (task, m, mine_free);
+
+  ide_task_run_in_thread (task, gbp_todo_model_mine_worker);
 }
 
 /**
@@ -567,6 +689,8 @@ gbp_todo_model_mine_async (GbpTodoModel        *self,
  * Completes an asynchronous request to gbp_todo_model_mine_async().
  *
  * Returns: %TRUE if successful; otherwise %FALSE and @error is set.
+ *
+ * Since: 3.32
  */
 gboolean
 gbp_todo_model_mine_finish (GbpTodoModel  *self,
@@ -574,7 +698,7 @@ gbp_todo_model_mine_finish (GbpTodoModel  *self,
                             GError       **error)
 {
   g_return_val_if_fail (GBP_IS_TODO_MODEL (self), FALSE);
-  g_return_val_if_fail (G_IS_TASK (result), FALSE);
+  g_return_val_if_fail (IDE_IS_TASK (result), FALSE);
 
-  return g_task_propagate_boolean (G_TASK (result), error);
+  return ide_task_propagate_boolean (IDE_TASK (result), error);
 }

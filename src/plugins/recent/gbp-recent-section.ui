@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <interface>
   <template class="GbpRecentSection" parent="GtkBin">
+    <property name="halign">center</property>
     <child>
       <object class="GtkBox">
+        <property name="hexpand">true</property>
         <property name="orientation">vertical</property>
         <property name="spacing">6</property>
         <property name="visible">true</property>
@@ -33,17 +35,6 @@
                         <attributes>
                           <attribute name="weight" value="bold"/>
                         </attributes>
-                      </object>
-                    </child>
-                    <child>
-                      <object class="GtkLabel">
-                        <property name="visible">true</property>
-                        <property name="label" translatable="yes">Updated</property>
-                        <property name="margin-end">10</property>
-                        <property name="halign">end</property>
-                        <style>
-                          <class name="dim-label"/>
-                        </style>
                       </object>
                     </child>
                   </object>

@@ -1,6 +1,6 @@
 /* gstyle-color-widget.c
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gstyle-color-widget"
@@ -173,7 +175,6 @@ gstyle_color_widget_drag_gesture_update (GtkGestureDrag    *gesture,
   gtk_window_set_screen (GTK_WINDOW (self->dnd_window), gtk_widget_get_screen (GTK_WIDGET (self)));
 
   gtk_container_add (GTK_CONTAINER (self->dnd_window), GTK_WIDGET (self->dnd_color_widget));
-  gtk_widget_show_all (self->dnd_window);
   gtk_widget_set_opacity (self->dnd_window, GSTYLE_COLOR_WIDGET_DRAG_ICON_OPACITY);
 
   sequence = gtk_gesture_single_get_current_sequence (GTK_GESTURE_SINGLE (gesture));
@@ -244,9 +245,7 @@ gstyle_color_widget_on_drag_leave (GtkWidget      *widget,
                                    GdkDragContext *context,
                                    guint           time)
 {
-  GstyleColorWidget *self = (GstyleColorWidget *)widget;
-
-  g_assert (GSTYLE_IS_COLOR_WIDGET (self));
+  g_assert (GSTYLE_IS_COLOR_WIDGET (widget));
   g_assert (GDK_IS_DRAG_CONTEXT (context));
 
   gtk_drag_unhighlight (widget);
@@ -587,9 +586,7 @@ gstyle_color_widget_on_drag_failed (GtkWidget      *widget,
                                     GdkDragContext *context,
                                     GtkDragResult   result)
 {
-  GstyleColorWidget *self = (GstyleColorWidget *)widget;
-
-  g_assert (GSTYLE_IS_COLOR_WIDGET (self));
+  g_assert (GSTYLE_IS_COLOR_WIDGET (widget));
   g_assert (GDK_IS_DRAG_CONTEXT (context));
 
   return FALSE;
@@ -1351,8 +1348,8 @@ gstyle_color_widget_finalize (GObject *object)
   g_clear_object (&self->filtered_color);
   g_clear_object (&self->default_provider);
 
-  g_clear_pointer (&self->checkered_pattern, cairo_pattern_destroy);
-  g_clear_pointer (&self->target_list, gtk_target_list_unref);
+  gstyle_clear_pointer (&self->checkered_pattern, cairo_pattern_destroy);
+  gstyle_clear_pointer (&self->target_list, gtk_target_list_unref);
 
   G_OBJECT_CLASS (gstyle_color_widget_parent_class)->finalize (object);
 }
@@ -1501,8 +1498,8 @@ gstyle_color_widget_class_init (GstyleColorWidgetClass *klass)
 
 
 static const GtkTargetEntry dnd_targets [] = {
-  {"GSTYLE_COLOR_WIDGET", GTK_TARGET_SAME_APP, 0},
-  {"application/x-color", 0, 0},
+  { (gchar *)"GSTYLE_COLOR_WIDGET", GTK_TARGET_SAME_APP, 0 },
+  { (gchar *)"application/x-color", 0, 0 },
 };
 
 static void
@@ -1561,6 +1558,7 @@ gstyle_color_widget_init (GstyleColorWidget *self)
 
   gstyle_color_widget_actions_init (self);
   gtk_widget_set_can_focus (GTK_WIDGET (self), TRUE);
+  gtk_widget_set_visible (GTK_WIDGET (self), TRUE);
 }
 
 GType

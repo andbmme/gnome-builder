@@ -1,6 +1,6 @@
 /* ide-ctags-service.c
  *
- * Copyright © 2015 Christian Hergert <christian@hergert.me>
+ * Copyright 2015-2019 Christian Hergert <christian@hergert.me>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "ide-ctags-service"
@@ -21,12 +23,17 @@
 #include <dazzle.h>
 #include <glib/gi18n.h>
 #include <gtksourceview/gtksource.h>
+#include <libide-code.h>
+#include <libide-vcs.h>
 
 #include "ide-ctags-builder.h"
 #include "ide-ctags-completion-provider.h"
 #include "ide-ctags-highlighter.h"
 #include "ide-ctags-index.h"
 #include "ide-ctags-service.h"
+#include "ide-tags-builder.h"
+
+#define QUEUED_BUILD_TIMEOUT_SECS 5
 
 struct _IdeCtagsService
 {
@@ -38,9 +45,13 @@ struct _IdeCtagsService
   GPtrArray        *completions;
   GHashTable       *build_timeout_by_dir;
 
+  IdeNotification  *notif;
+  gint              n_active;
+
+  guint             did_full_build : 1;
   guint             queued_miner_handler;
   guint             miner_active : 1;
-  guint             needs_recursive_mine : 1;
+  guint             paused : 1;
 };
 
 typedef struct
@@ -49,10 +60,102 @@ typedef struct
   guint  recursive;
 } MineInfo;
 
-static void service_iface_init (IdeServiceInterface *iface);
+typedef struct
+{
+  IdeCtagsService *self;
+  GFile           *directory;
+  gboolean         recursive;
+} QueuedRequest;
 
-G_DEFINE_DYNAMIC_TYPE_EXTENDED (IdeCtagsService, ide_ctags_service, IDE_TYPE_OBJECT, 0,
-                                G_IMPLEMENT_INTERFACE (IDE_TYPE_SERVICE, service_iface_init))
+G_DEFINE_TYPE (IdeCtagsService, ide_ctags_service, IDE_TYPE_OBJECT)
+
+enum {
+  PROP_0,
+  PROP_PAUSED,
+  N_PROPS
+};
+
+static GParamSpec *properties [N_PROPS];
+
+static void
+queued_request_free (gpointer data)
+{
+  QueuedRequest *qr = data;
+
+  g_clear_object (&qr->self);
+  g_clear_object (&qr->directory);
+  g_slice_free (QueuedRequest, qr);
+}
+
+static gboolean
+is_supported_language (const gchar *lang_id)
+{
+  /* Some languages we expect ctags to actually parse when saved.
+   * Keep in sync with our .plugin file.
+   */
+  static const gchar *supported[] = {
+    "c", "cpp", "chdr", "cpphdr", "python", "python3",
+    "js", "css", "html", "ruby",
+    NULL
+  };
+
+  if (lang_id == NULL)
+    return FALSE;
+
+  return g_strv_contains (supported, lang_id);
+}
+
+static void
+show_notification (IdeCtagsService *self)
+{
+  g_autoptr(IdeContext) context = NULL;
+  g_autoptr(IdeNotification) notif = NULL;
+  g_autoptr(GIcon) icon = NULL;
+
+  g_assert (IDE_IS_MAIN_THREAD ());
+  g_assert (IDE_IS_CTAGS_SERVICE (self));
+  g_assert (self->n_active >= 0);
+
+  self->n_active++;
+
+  if (self->n_active > 1)
+    return;
+
+  g_assert (self->notif == NULL);
+
+  if (!(context = ide_object_ref_context (IDE_OBJECT (self))))
+    return;
+
+  notif = ide_notification_new ();
+  icon = g_icon_new_for_string ("media-playback-pause-symbolic", NULL);
+  ide_notification_set_title (notif, _("Indexing Source Code"));
+  ide_notification_set_body (notif, _("Search, autocompletion, and symbol information may be limited until Ctags indexing is complete."));
+  ide_notification_set_has_progress (notif, TRUE);
+  ide_notification_set_progress_is_imprecise (notif, TRUE);
+  ide_notification_add_button (notif, NULL, icon, "win.pause-ctags");
+  ide_notification_attach (notif, IDE_OBJECT (context));
+
+  self->notif = g_steal_pointer (&notif);
+}
+
+static void
+hide_notification (IdeCtagsService *self)
+{
+  g_assert (IDE_IS_MAIN_THREAD ());
+  g_assert (IDE_IS_CTAGS_SERVICE (self));
+  g_assert (self->n_active > 0);
+
+  self->n_active--;
+
+  if (self->n_active == 0)
+    {
+      if (self->notif != NULL)
+        {
+          ide_notification_withdraw_in_seconds (self->notif, 3);
+          g_clear_object (&self->notif);
+        }
+    }
+}
 
 static void
 ide_ctags_service_build_index_init_cb (GObject      *object,
@@ -99,13 +202,11 @@ resolve_path_root (IdeCtagsService *self,
 {
   g_autoptr(GFile) parent = NULL;
   g_autoptr(GFile) cache_file = NULL;
+  g_autoptr(GFile) workdir = NULL;
   IdeContext *context;
-  IdeVcs *vcs;
-  GFile *workdir;
 
   context = ide_object_get_context (IDE_OBJECT (self));
-  vcs = ide_context_get_vcs (context);
-  workdir = ide_vcs_get_working_directory (vcs);
+  workdir = ide_context_ref_workdir (context);
   parent = g_file_get_parent (file);
 
   /*
@@ -363,8 +464,8 @@ ide_ctags_service_miner (GTask        *task,
                          GCancellable *cancellable)
 {
   IdeCtagsService *self = source_object;
-  IdeContext *context;
-  IdeVcs *vcs;
+  g_autoptr(IdeContext) context = NULL;
+  g_autoptr(IdeVcs) vcs = NULL;
   GArray *mine_info = task_data;
 
   IDE_ENTRY;
@@ -373,8 +474,8 @@ ide_ctags_service_miner (GTask        *task,
   g_assert (IDE_IS_CTAGS_SERVICE (self));
   g_assert (mine_info != NULL);
 
-  context = ide_object_get_context (IDE_OBJECT (self));
-  vcs = ide_context_get_vcs (context);
+  if ((context = ide_object_ref_context (IDE_OBJECT (self))))
+    vcs = ide_object_get_child_typed (IDE_OBJECT (context), IDE_TYPE_VCS);
 
   for (guint i = 0; i < mine_info->len; i++)
     {
@@ -401,12 +502,11 @@ static gboolean
 ide_ctags_service_do_mine (gpointer data)
 {
   IdeCtagsService *self = data;
+  g_autoptr(IdeContext) context = NULL;
   g_autoptr(GTask) task = NULL;
   g_autoptr(GArray) mine_info = NULL;
-  g_autofree gchar *path = NULL;
-  IdeContext *context;
+  g_autoptr(GFile) workdir = NULL;
   MineInfo info;
-  GFile *workdir;
 
   IDE_ENTRY;
 
@@ -415,31 +515,37 @@ ide_ctags_service_do_mine (gpointer data)
   self->queued_miner_handler = 0;
   self->miner_active = TRUE;
 
-  context = ide_object_get_context (IDE_OBJECT (self));
-  workdir = ide_vcs_get_working_directory (ide_context_get_vcs (context));
+  if (!ide_object_in_destruction (IDE_OBJECT (self)) &&
+      (context = ide_object_ref_context (IDE_OBJECT (self))))
+    {
+      workdir = ide_context_ref_workdir (context);
 
-  mine_info = g_array_new (FALSE, FALSE, sizeof (MineInfo));
-  g_array_set_clear_func (mine_info, clear_mine_info);
+      mine_info = g_array_new (FALSE, FALSE, sizeof (MineInfo));
+      g_array_set_clear_func (mine_info, clear_mine_info);
 
-  /* mine: ~/.cache/gnome-builder/projects/$project_id/ctags/ */
-  info.path = ide_context_cache_filename (context, "ctags", NULL);
-  info.recursive = TRUE;
-  g_array_append_val (mine_info, info);
+      /* mine: ~/.cache/gnome-builder/projects/$project_id/ctags/ */
+      info.path = ide_context_cache_filename (context, "ctags", NULL);
+      info.recursive = TRUE;
+      g_array_append_val (mine_info, info);
 
-  /* mine: ~/.tags */
-  info.path = g_strdup (g_get_home_dir ());
-  info.recursive = FALSE;
-  g_array_append_val (mine_info, info);
+#if 0
+      /* mine: ~/.tags */
+      info.path = g_strdup (g_get_home_dir ());
+      info.recursive = FALSE;
+      g_array_append_val (mine_info, info);
+#endif
 
-  /* mine the project tree */
-  info.path = g_file_get_path (workdir);
-  info.recursive = TRUE;
-  g_array_append_val (mine_info, info);
+      /* mine the project tree */
+      info.path = g_file_get_path (workdir);
+      info.recursive = TRUE;
+      g_array_append_val (mine_info, info);
 
-  task = g_task_new (self, NULL, NULL, NULL);
-  g_task_set_source_tag (task, ide_ctags_service_do_mine);
-  g_task_set_task_data (task, g_steal_pointer (&mine_info), (GDestroyNotify)g_array_unref);
-  ide_thread_pool_push_task (IDE_THREAD_POOL_INDEXER, task, ide_ctags_service_miner);
+      task = g_task_new (self, NULL, NULL, NULL);
+      g_task_set_source_tag (task, ide_ctags_service_do_mine);
+      g_task_set_priority (task, G_PRIORITY_LOW + 1000);
+      g_task_set_task_data (task, g_steal_pointer (&mine_info), (GDestroyNotify)g_array_unref);
+      ide_thread_pool_push_task (IDE_THREAD_POOL_INDEXER, task, ide_ctags_service_miner);
+    }
 
   IDE_RETURN (G_SOURCE_REMOVE);
 }
@@ -452,11 +558,11 @@ ide_ctags_service_queue_mine (IdeCtagsService *self)
   if (self->queued_miner_handler == 0 && self->miner_active == FALSE)
     {
       self->queued_miner_handler =
-        g_timeout_add_full (250,
-                            G_PRIORITY_DEFAULT,
-                            ide_ctags_service_do_mine,
-                            g_object_ref (self),
-                            g_object_unref);
+        g_timeout_add_seconds_full (1,
+                                    G_PRIORITY_DEFAULT,
+                                    ide_ctags_service_do_mine,
+                                    g_object_ref (self),
+                                    g_object_unref);
     }
 }
 
@@ -465,67 +571,82 @@ build_system_tags_cb (GObject      *object,
                       GAsyncResult *result,
                       gpointer      user_data)
 {
-  IdeTagsBuilder *builder = (IdeTagsBuilder *)object;
   g_autoptr(IdeCtagsService) self = user_data;
 
-  g_assert (IDE_IS_TAGS_BUILDER (builder));
+  g_assert (IDE_IS_MAIN_THREAD ());
+  g_assert (IDE_IS_TAGS_BUILDER (object));
+  g_assert (G_IS_ASYNC_RESULT (result));
+  g_assert (IDE_IS_CTAGS_SERVICE (self));
 
+  ide_object_destroy (IDE_OBJECT (object));
   ide_ctags_service_queue_mine (self);
+  hide_notification (self);
 }
 
 static gboolean
 restart_miner (gpointer user_data)
 {
-  g_autofree gpointer *data = user_data;
-  g_autoptr(IdeCtagsService) self = data[0];
-  g_autoptr(GFile) directory = data[1];
   g_autoptr(IdeTagsBuilder) tags_builder = NULL;
-  IdeBuildSystem *build_system;
-  IdeContext *context;
+  QueuedRequest *qr = user_data;
 
   IDE_ENTRY;
 
-  g_assert (IDE_IS_CTAGS_SERVICE (self));
+  g_assert (qr != NULL);
+  g_assert (IDE_IS_CTAGS_SERVICE (qr->self));
+  g_assert (G_IS_FILE (qr->directory));
 
-  g_hash_table_remove (self->build_timeout_by_dir, directory);
+  /* Just skip for now if we got here somehow and paused */
+  if (qr->self->paused)
+    IDE_RETURN (G_SOURCE_CONTINUE);
 
-  context = ide_object_get_context (IDE_OBJECT (self));
-  build_system = ide_context_get_build_system (context);
+  g_hash_table_remove (qr->self->build_timeout_by_dir, qr->directory);
 
-  if (IDE_IS_TAGS_BUILDER (build_system))
-    tags_builder = g_object_ref (IDE_TAGS_BUILDER (build_system));
-  else
-    tags_builder = ide_ctags_builder_new (context);
+  tags_builder = ide_ctags_builder_new ();
+  ide_object_append (IDE_OBJECT (qr->self), IDE_OBJECT (tags_builder));
+
+  show_notification (qr->self);
 
   ide_tags_builder_build_async (tags_builder,
-                                directory,
-                                self->needs_recursive_mine,
-                                NULL,
+                                qr->directory,
+                                qr->recursive,
+                                qr->self->cancellable,
                                 build_system_tags_cb,
-                                g_object_ref (self));
-
-  self->needs_recursive_mine = FALSE;
+                                g_object_ref (qr->self));
 
   IDE_RETURN (G_SOURCE_REMOVE);
 }
 
 static void
 ide_ctags_service_queue_build_for_directory (IdeCtagsService *self,
-                                             GFile           *directory)
+                                             GFile           *directory,
+                                             gboolean         recursive)
 {
   g_assert (IDE_IS_CTAGS_SERVICE (self));
   g_assert (G_IS_FILE (directory));
 
+  if (ide_object_in_destruction (IDE_OBJECT (self)))
+    return;
+
   if (!g_hash_table_lookup (self->build_timeout_by_dir, directory))
     {
-      gpointer *data;
-      guint source_id;
+      QueuedRequest *qr;
+      GSource *source;
+      guint source_id = 0;
 
-      data = g_new0 (gpointer, 2);
-      data[0] = g_object_ref (self);
-      data[1] = g_object_ref (directory);
+      qr = g_slice_new (QueuedRequest);
+      qr->self = g_object_ref (self);
+      qr->directory = g_object_ref (directory);
+      qr->recursive = !!recursive;
 
-      source_id = g_timeout_add_seconds (5, restart_miner, data);
+      source_id = g_timeout_add_seconds_full (G_PRIORITY_LOW,
+                                              QUEUED_BUILD_TIMEOUT_SECS,
+                                              restart_miner,
+                                              g_steal_pointer (&qr),
+                                              queued_request_free);
+
+      if (self->paused &&
+          (source = g_main_context_find_source_by_id (NULL, source_id)))
+        g_source_set_ready_time (source, -1);
 
       g_hash_table_insert (self->build_timeout_by_dir,
                            g_object_ref (directory),
@@ -539,6 +660,9 @@ ide_ctags_service_buffer_saved (IdeCtagsService  *self,
                                 IdeBufferManager *buffer_manager)
 {
   g_autoptr(GFile) parent = NULL;
+  g_autoptr(GFile) workdir = NULL;
+  IdeContext *context;
+  GFile *file;
 
   IDE_ENTRY;
 
@@ -546,60 +670,72 @@ ide_ctags_service_buffer_saved (IdeCtagsService  *self,
   g_assert (IDE_IS_BUFFER (buffer));
   g_assert (IDE_IS_BUFFER_MANAGER (buffer_manager));
 
-  parent = g_file_get_parent (ide_file_get_file (ide_buffer_get_file (buffer)));
-  ide_ctags_service_queue_build_for_directory (self, parent);
+  context = ide_object_get_context (IDE_OBJECT (self));
+  workdir = ide_context_ref_workdir (context);
+
+  if (!self->did_full_build)
+    {
+      self->did_full_build = TRUE;
+      ide_ctags_service_queue_build_for_directory (self, workdir, TRUE);
+      return;
+    }
+
+  file = ide_buffer_get_file (buffer);
+  parent = g_file_get_parent (file);
+
+  if (g_file_has_prefix (file, workdir) &&
+      is_supported_language (ide_buffer_get_language_id (buffer)))
+    ide_ctags_service_queue_build_for_directory (self, parent, FALSE);
 
   IDE_EXIT;
 }
 
 static void
-ide_ctags_service_context_loaded (IdeService *service)
+ide_ctags_service_parent_set (IdeObject *object,
+                              IdeObject *parent)
 {
-  IdeBufferManager *buffer_manager;
-  IdeCtagsService *self = (IdeCtagsService *)service;
-  IdeContext *context;
-  GFile *workdir;
+  IdeCtagsService *self = (IdeCtagsService *)object;
+  g_autoptr(GFile) workdir = NULL;
+  IdeBufferManager *bufmgr;
 
   IDE_ENTRY;
 
   g_assert (IDE_IS_CTAGS_SERVICE (self));
+  g_assert (!parent || IDE_IS_CONTEXT (parent));
 
-  context = ide_object_get_context (IDE_OBJECT (self));
-  buffer_manager = ide_context_get_buffer_manager (context);
-  workdir = ide_vcs_get_working_directory (ide_context_get_vcs (context));
+  if (parent == NULL)
+    IDE_EXIT;
 
-  g_signal_connect_object (buffer_manager,
+  bufmgr = ide_buffer_manager_from_context (IDE_CONTEXT (parent));
+  workdir = ide_context_ref_workdir (IDE_CONTEXT (parent));
+
+  g_signal_connect_object (bufmgr,
                            "buffer-saved",
                            G_CALLBACK (ide_ctags_service_buffer_saved),
                            self,
                            G_CONNECT_SWAPPED);
 
-  /*
-   * Rebuild all ctags for the project at startup of the service.
-   * Then we do incrementals from there on out.
+  /* We don't do any rebuilds up-front because users find them annoying.
+   * Instead, we wait until a file has been saved and then re-index content
+   * for the whole project (if necessary).
    */
-  self->needs_recursive_mine = TRUE;
-  ide_ctags_service_queue_build_for_directory (self, workdir);
 
   IDE_EXIT;
 }
 
 static void
-ide_ctags_service_start (IdeService *service)
+ide_ctags_service_destroy (IdeObject *object)
 {
-}
+  IdeCtagsService *self = (IdeCtagsService *)object;
 
-static void
-ide_ctags_service_stop (IdeService *service)
-{
-  IdeCtagsService *self = (IdeCtagsService *)service;
+  g_assert (IDE_IS_CTAGS_SERVICE (self));
 
-  g_return_if_fail (IDE_IS_CTAGS_SERVICE (self));
+  g_clear_handle_id (&self->queued_miner_handler, g_source_remove);
 
-  if (self->cancellable && !g_cancellable_is_cancelled (self->cancellable))
-    g_cancellable_cancel (self->cancellable);
-
+  g_cancellable_cancel (self->cancellable);
   g_clear_object (&self->cancellable);
+
+  IDE_OBJECT_CLASS (ide_ctags_service_parent_class)->destroy (object);
 }
 
 static void
@@ -621,24 +757,71 @@ ide_ctags_service_finalize (GObject *object)
 }
 
 static void
+ide_ctags_service_get_property (GObject    *object,
+                                guint       prop_id,
+                                GValue     *value,
+                                GParamSpec *pspec)
+{
+  IdeCtagsService *self = IDE_CTAGS_SERVICE (object);
+
+  switch (prop_id)
+    {
+    case PROP_PAUSED:
+      g_value_set_boolean (value, self->paused);
+      break;
+
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+    }
+}
+
+static void
+ide_ctags_service_set_property (GObject      *object,
+                                guint         prop_id,
+                                const GValue *value,
+                                GParamSpec   *pspec)
+{
+  IdeCtagsService *self = IDE_CTAGS_SERVICE (object);
+
+  switch (prop_id)
+    {
+    case PROP_PAUSED:
+      if (g_value_get_boolean (value) != self->paused)
+        {
+          if (self->paused)
+            ide_ctags_service_unpause (self);
+          else
+            ide_ctags_service_pause (self);
+        }
+      break;
+
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+    }
+}
+
+static void
 ide_ctags_service_class_init (IdeCtagsServiceClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
+  IdeObjectClass *i_object_class = IDE_OBJECT_CLASS (klass);
+
+  object_class->get_property = ide_ctags_service_get_property;
+  object_class->set_property = ide_ctags_service_set_property;
+
+  i_object_class->parent_set = ide_ctags_service_parent_set;
+  i_object_class->destroy = ide_ctags_service_destroy;
 
   object_class->finalize = ide_ctags_service_finalize;
-}
 
-static void
-service_iface_init (IdeServiceInterface *iface)
-{
-  iface->context_loaded = ide_ctags_service_context_loaded;
-  iface->start = ide_ctags_service_start;
-  iface->stop = ide_ctags_service_stop;
-}
+  properties [PROP_PAUSED] =
+    g_param_spec_boolean ("paused",
+                          "Paused",
+                          "If the service is paused",
+                          FALSE,
+                          (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
-static void
-ide_ctags_service_class_finalize (IdeCtagsServiceClass *klass)
-{
+  g_object_class_install_properties (object_class, N_PROPS, properties);
 }
 
 static void
@@ -665,12 +848,6 @@ ide_ctags_service_init (IdeCtagsService *self)
   dzl_task_cache_set_name (self->indexes, "ctags index cache");
 }
 
-void
-_ide_ctags_service_register_type (GTypeModule *module)
-{
-  ide_ctags_service_register_type (module);
-}
-
 /**
  * ide_ctags_service_get_indexes:
  *
@@ -679,6 +856,8 @@ _ide_ctags_service_register_type (GTypeModule *module)
  * Note: this does not sort the indexes by importance.
  *
  * Returns: (transfer container) (element-type Ide.CtagsIndex): An array of indexes.
+ *
+ * Since: 3.32
  */
 GPtrArray *
 ide_ctags_service_get_indexes (IdeCtagsService *self)
@@ -748,4 +927,74 @@ ide_ctags_service_unregister_completion (IdeCtagsService            *self,
   g_return_if_fail (IDE_IS_CTAGS_COMPLETION_PROVIDER (completion));
 
   g_ptr_array_remove (self->completions, completion);
+}
+
+void
+ide_ctags_service_pause (IdeCtagsService *self)
+{
+  GHashTableIter iter;
+  gpointer key;
+  gpointer value;
+
+  g_return_if_fail (IDE_IS_CTAGS_SERVICE (self));
+
+  if (ide_object_in_destruction (IDE_OBJECT (self)))
+    return;
+
+  if (self->paused)
+    return;
+
+  g_cancellable_cancel (self->cancellable);
+  g_clear_object (&self->cancellable);
+  self->cancellable = g_cancellable_new ();
+
+  self->paused = TRUE;
+
+  /* Make sure we show the pause state so the user can unpause */
+  show_notification (self);
+  ide_notification_set_title (self->notif, _("Indexing Source Code (Paused)"));
+
+  g_hash_table_iter_init (&iter, self->build_timeout_by_dir);
+
+  while (g_hash_table_iter_next (&iter, &key, &value))
+    {
+      GSource *source;
+
+      /* Make the source innactive until we are unpaused */
+      if ((source = g_main_context_find_source_by_id (NULL, GPOINTER_TO_UINT (value))))
+        g_source_set_ready_time (source, -1);
+    }
+}
+
+void
+ide_ctags_service_unpause (IdeCtagsService *self)
+{
+  GHashTableIter iter;
+  gpointer key;
+  gpointer value;
+
+  g_return_if_fail (IDE_IS_CTAGS_SERVICE (self));
+
+  if (ide_object_in_destruction (IDE_OBJECT (self)))
+    return;
+
+  if (!self->paused)
+    return;
+
+  self->paused = FALSE;
+
+  g_hash_table_iter_init (&iter, self->build_timeout_by_dir);
+
+  while (g_hash_table_iter_next (&iter, &key, &value))
+    {
+      GSource *source;
+
+      /* Make the source innactive until we are unpaused */
+      if ((source = g_main_context_find_source_by_id (NULL, GPOINTER_TO_UINT (value))))
+        g_source_set_ready_time (source, 0);
+    }
+
+  /* Now we can drop our paused state */
+  ide_notification_set_title (self->notif, _("Indexing Source Code"));
+  hide_notification (self);
 }

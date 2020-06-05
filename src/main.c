@@ -1,6 +1,6 @@
 /* main.c
  *
- * Copyright © 2014 Christian Hergert <christian@hergert.me>
+ * Copyright 2018-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,21 +14,104 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-#define G_LOG_DOMAIN "builder"
+#define G_LOG_DOMAIN "main"
 
-#include <ide.h>
+#include "config.h"
+
+#include <girepository.h>
 #include <glib/gi18n.h>
 #include <gtksourceview/gtksource.h>
-#include <stdlib.h>
+#include <libide-core.h>
+#include <libide-code.h>
+#include <libide-editor.h>
+#include <libide-greeter.h>
+#include <libide-gui.h>
+#include <libide-threading.h>
+#include <locale.h>
+#ifdef ENABLE_TRACING_SYSCAP
+# include <sysprof-capture.h>
+#endif
+#include <sched.h>
+#include <unistd.h>
 
-#include "application/ide-application-private.h"
-#include "plugins/gnome-builder-plugins.h"
+#include "ide-application-private.h"
+#include "ide-thread-private.h"
+#include "ide-terminal-private.h"
+#include "ide-private.h"
 
 #include "bug-buddy.h"
 
-static IdeApplicationMode early_mode;
+#ifdef ENABLE_TRACING_SYSCAP
+static SysprofCaptureWriter *trace_writer;
+static G_LOCK_DEFINE (tracer);
+
+static void
+trace_load (void)
+{
+  sysprof_clock_init ();
+  trace_writer = sysprof_capture_writer_new_from_env (0);
+}
+
+static void
+trace_unload (void)
+{
+  if (trace_writer)
+    {
+      sysprof_capture_writer_flush (trace_writer);
+      g_clear_pointer (&trace_writer, sysprof_capture_writer_unref);
+    }
+}
+
+static void
+trace_function (const gchar    *func,
+                gint64          begin_time_usec,
+                gint64          end_time_usec)
+{
+  if (trace_writer != NULL)
+    {
+      G_LOCK (tracer);
+      sysprof_capture_writer_add_mark (trace_writer,
+                                       begin_time_usec * 1000L,
+                                       sched_getcpu (),
+                                       getpid (),
+                                       (end_time_usec - begin_time_usec) * 1000L,
+                                       "tracing",
+                                       "function",
+                                       func);
+      G_UNLOCK (tracer);
+    }
+}
+
+static void
+trace_log (GLogLevelFlags  log_level,
+           const gchar    *domain,
+           const gchar    *message)
+{
+  if (trace_writer != NULL)
+    {
+      G_LOCK (tracer);
+      sysprof_capture_writer_add_log (trace_writer,
+                                      SYSPROF_CAPTURE_CURRENT_TIME,
+                                      sched_getcpu (),
+                                      getpid (),
+                                      log_level,
+                                      domain,
+                                      message);
+      G_UNLOCK (tracer);
+    }
+}
+
+static IdeTraceVTable trace_vtable = {
+  trace_load,
+  trace_unload,
+  trace_function,
+  trace_log,
+};
+#endif
 
 static gboolean
 verbose_cb (const gchar  *option_name,
@@ -41,83 +124,111 @@ verbose_cb (const gchar  *option_name,
 }
 
 static void
-early_params_check (gint    *argc,
-                    gchar ***argv)
+early_params_check (gint       *argc,
+                    gchar    ***argv,
+                    gboolean   *standalone,
+                    gchar     **type,
+                    gchar     **plugin,
+                    gchar     **dbus_address)
 {
-  g_autofree gchar *type = NULL;
   g_autoptr(GOptionContext) context = NULL;
+  g_autoptr(GOptionGroup) gir_group = NULL;
   GOptionEntry entries[] = {
+    { "standalone", 's', 0, G_OPTION_ARG_NONE, standalone, N_("Run a new instance of Builder") },
     { "verbose", 'v', G_OPTION_FLAG_NO_ARG, G_OPTION_ARG_CALLBACK, verbose_cb },
-    { "type", 0, 0, G_OPTION_ARG_STRING, &type },
+    { "plugin", 0, 0, G_OPTION_ARG_STRING, plugin },
+    { "type", 0, 0, G_OPTION_ARG_STRING, type },
+    { "dbus-address", 0, 0, G_OPTION_ARG_STRING, dbus_address },
     { NULL }
   };
+
+  gir_group = g_irepository_get_option_group ();
 
   context = g_option_context_new (NULL);
   g_option_context_set_ignore_unknown_options (context, TRUE);
   g_option_context_set_help_enabled (context, FALSE);
   g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_add_group (context, g_steal_pointer (&gir_group));
   g_option_context_parse (context, argc, argv, NULL);
-
-  if (g_strcmp0 (type, "worker") == 0)
-    early_mode = IDE_APPLICATION_MODE_WORKER;
-  else if (g_strcmp0 (type, "cli") == 0)
-    early_mode = IDE_APPLICATION_MODE_TOOL;
 }
 
-static void
-early_ssl_check (void)
+static gboolean
+_home_contains_symlink (const gchar *path)
 {
-  /*
-   * This tries to locate the SSL cert.pem and overrides the environment
-   * variable. Otherwise, chances are we won't be able to validate SSL
-   * certificates while inside of flatpak.
-   *
-   * Ideally, we will be able to delete this once Flatpak has a solution
-   * for SSL certificate management inside of applications.
+  g_autofree gchar *parent = NULL;
+
+  if (g_file_test (path, G_FILE_TEST_IS_SYMLINK))
+    return TRUE;
+
+  if ((parent = g_path_get_dirname (path)) && !g_str_equal (parent, "/"))
+    return _home_contains_symlink (parent);
+
+  return FALSE;
+}
+
+static gboolean
+home_contains_symlink (void)
+{
+  return _home_contains_symlink (g_get_home_dir ());
+}
+
+static gboolean
+is_running_in_shell (void)
+{
+  const gchar *shlvl = g_getenv ("SHLVL");
+
+  /* GNOME Shell, among other desktop shells may set SHLVL=0 to indicate
+   * that we are not running within a shell. Use that before checking any
+   * file-descriptors since it is more reliable.
    */
-  if (ide_is_flatpak ())
-    {
-      if (NULL == g_getenv ("SSL_CERT_FILE"))
-        {
-          static const gchar *ssl_cert_paths[] = {
-            "/etc/pki/tls/cert.pem",
-            "/etc/ssl/cert.pem",
-            NULL
-          };
+  if (ide_str_equal0 (shlvl, "0"))
+    return FALSE;
 
-          for (guint i = 0; ssl_cert_paths[i]; i++)
-            {
-              if (g_file_test (ssl_cert_paths[i], G_FILE_TEST_EXISTS))
-                {
-                  g_setenv ("SSL_CERT_FILE", ssl_cert_paths[i], TRUE);
-                  g_message ("Using “%s” for SSL_CERT_FILE.", ssl_cert_paths[i]);
-                  break;
-                }
-            }
-        }
-    }
+  /* If stdin is not a TTY, then assume we have no access to communicate
+   * with the user via console. We use stdin instead of stdout as a logging
+   * system may have a PTY for stdout to get colorized output.
+   */
+  if (!isatty (STDIN_FILENO))
+    return FALSE;
+
+  return TRUE;
 }
 
-int
-main (int   argc,
-      char *argv[])
+gint
+main (gint   argc,
+      gchar *argv[])
 {
+  g_autofree gchar *plugin = NULL;
+  g_autofree gchar *type = NULL;
+  g_autofree gchar *dbus_address = NULL;
   IdeApplication *app;
   const gchar *desktop;
+  gboolean standalone = FALSE;
   int ret;
 
-  /* Setup our gdb fork()/exec() helper */
-  bug_buddy_init ();
+  /* Setup our gdb fork()/exec() helper if we're in a terminal */
+  if (is_running_in_shell ())
+    bug_buddy_init ();
 
-  /*
-   * We require a desktop session that provides a properly working
-   * DBus environment. Bail if for some reason that is not the case.
-   */
-  if (g_getenv ("DBUS_SESSION_BUS_ADDRESS") == NULL)
-    {
-      g_printerr (_("GNOME Builder requires a desktop session with D-Bus. Please set DBUS_SESSION_BUS_ADDRESS."));
-      return EXIT_FAILURE;
-    }
+  /* Always ignore SIGPIPE */
+  signal (SIGPIPE, SIG_IGN);
+
+  /* Set up gettext translations */
+  setlocale (LC_ALL, "");
+  bindtextdomain (GETTEXT_PACKAGE, LOCALEDIR);
+  bind_textdomain_codeset (GETTEXT_PACKAGE, "UTF-8");
+  textdomain (GETTEXT_PACKAGE);
+
+  /* Setup various application name/id defaults. */
+  g_set_prgname (ide_get_program_name ());
+  g_set_application_name (_("Builder"));
+
+#if 0
+  /* TODO: allow support for parallel nightly install */
+#ifdef DEVELOPMENT_BUILD
+  ide_set_application_id ("org.gnome.Builder-Devel");
+#endif
+#endif
 
   /* Early init of logging so that we get messages in a consistent
    * format. If we deferred this to GApplication, we'd get them in
@@ -125,13 +236,25 @@ main (int   argc,
    */
   ide_log_init (TRUE, NULL);
 
-  /* Extract options like -vvvv and --type=worker only */
-  early_params_check (&argc, &argv);
+  /* Extract options like -vvvv */
+  early_params_check (&argc, &argv, &standalone, &type, &plugin, &dbus_address);
 
-  /* We might need to prime SSL environment and other bits before
-   * the application has had a chance to setup caches/etc.
+  /* Log some info so it shows up in logs */
+  g_message ("GNOME Builder %s starting with ABI %s",
+             PACKAGE_VERSION, PACKAGE_ABI_S);
+
+  /* Make sure $HOME is not a symlink, as that can cause issues with
+   * various subsystems. Just warn super loud so that users find it
+   * when trying to debug issues.
+   *
+   * Silverblue did this, but has since stopped (and some users will
+   * lag behind until their systems are fixed).
+   *
+   * https://gitlab.gnome.org/GNOME/gnome-builder/issues/859
    */
-  early_ssl_check ();
+  if (home_contains_symlink ())
+    g_critical ("User home directory uses a symlink. "
+                "This is not supported and may result in unforseen issues.");
 
   /* Log what desktop is being used to simplify tracking down
    * quirks in the future.
@@ -140,48 +263,42 @@ main (int   argc,
   if (desktop == NULL)
     desktop = "unknown";
 
+#ifdef ENABLE_TRACING_SYSCAP
+  _ide_trace_init (&trace_vtable);
+#endif
+
   g_message ("Initializing with %s desktop and GTK+ %d.%d.%d.",
              desktop,
              gtk_get_major_version (),
              gtk_get_minor_version (),
              gtk_get_micro_version ());
 
-  /*
-   * FIXME: Work around type registration deadlocks in GObject.
-   *
-   * There seems to be a deadlock in GObject type registration from
-   * different threads based on some different parts of the type system.
-   * This is problematic because we occasionally race during startup in
-   * GZlibDecopmressor's get_type() registration.
-   *
-   * Instead, we'll just deal with this early by registering the type
-   * as soon as possible.
-   *
-   * https://bugzilla.gnome.org/show_bug.cgi?id=779199
-   */
-  g_type_ensure (G_TYPE_ZLIB_DECOMPRESSOR);
+  gtk_source_init ();
 
-  /* Setup the application instance */
-  app = ide_application_new ();
-  _ide_application_set_mode (app, early_mode);
+  /* Initialize thread pools */
+  _ide_thread_pool_init (FALSE);
 
-  /* Ensure that our static plugins init routine is called.
-   * This is necessary to ensure that -Wl,--as-needed does not
-   * drop our link to this shared library.
-   */
-  gnome_builder_plugins_init ();
+  /* Guess the user shell early */
+  _ide_guess_shell ();
 
-  /* Block until the application exits */
+  app = _ide_application_new (standalone, type, plugin, dbus_address);
+  g_application_add_option_group (G_APPLICATION (app), g_irepository_get_option_group ());
   ret = g_application_run (G_APPLICATION (app), argc, argv);
-
   /* Force disposal of the application (to help catch cleanup
    * issues at shutdown) and then (hopefully) finalize the app.
    */
   g_object_run_dispose (G_OBJECT (app));
   g_clear_object (&app);
 
-  /* Cleanup logging and flush anything that still needs it */
+  /* Flush any outstanding logs */
   ide_log_shutdown ();
+
+  /* Cleanup GtkSourceView singletons to improve valgrind output */
+  gtk_source_finalize ();
+
+#ifdef ENABLE_TRACING_SYSCAP
+  _ide_trace_shutdown ();
+#endif
 
   return ret;
 }

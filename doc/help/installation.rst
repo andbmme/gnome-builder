@@ -1,13 +1,13 @@
 
 .. _Installation:
 .. _Flatpak: https://flatpak.org
-.. _Stable: https://git.gnome.org/browse/gnome-apps-nightly/plain/gnome-builder.flatpakref?h=stable
-.. _Nightly: https://git.gnome.org/browse/gnome-apps-nightly/plain/gnome-builder.flatpakref
+.. _Stable: https://flathub.org/repo/appstream/org.gnome.Builder.flatpakref
+.. _Nightly: https://nightly.gnome.org/repo/appstream/org.gnome.Builder.flatpakref
 .. _Software: https://wiki.gnome.org/Apps/Software
 .. _GNOME: https://gnome.org/
 .. _JHBuild: https://wiki.gnome.org/Newcomers/BuildGnome
 .. _`Newcomers Tutorial`: https://wiki.gnome.org/Newcomers
-.. _`filing a bug`: https://bugzilla.gnome.org/enter_bug.cgi?product=gnome-builder
+.. _`filing a bug`: https://gitlab.gnome.org/GNOME/gnome-builder/issues
 
 ############
 Installation
@@ -28,8 +28,6 @@ If Software_ does not automatically open, try opening the Stable_ flatpakref by 
 
 If you want to track Builder development, you might want the Nightly_ channel instead of Stable_.
 
-.. note:: To build flatpak-based applications, ensure that the ``flatpak-builder`` program is installed. On Fedora, this is the ``flatpak-builder`` package.
-
 Command Line
 ^^^^^^^^^^^^
 
@@ -46,32 +44,10 @@ You can also use the command line to install Builder:
 
 .. code-block:: sh
 
-   $ flatpak install --user --from https://git.gnome.org/browse/gnome-apps-nightly/plain/gnome-builder.flatpakref
+   $ flatpak install --user --from https://nightly.gnome.org/repo/appstream/org.gnome.Builder.flatpakref
    $ flatpak run org.gnome.Builder
 
 .. note:: Nightly builds are built with tracing enabled. The tracing is fairly lightweight, but it includes a great deal of more debugging information.
-
-Local Flatpak Builds
---------------------
-
-You can also build Builder as a flatpak yourself to test local changes. First, make a repo for your local builds:
-
-.. code-block:: sh
-
-   $ mkdir ~/my-flatpak-builds
-   $ flatpak remote-add --user --no-gpg-verify my-flatpak-builds ~/my-flatpak-builds
-
-Now, in Builder's source directory, use ``flatpak-builder`` to build a Builder flatpak and install it
-
-.. code-block:: sh
-
-   $ git clone https://git.gnome.org/browse/gnome-builder/
-   $ cd gnome-builder
-   $ mkdir app
-   $ flatpak-builder --ccache --repo=$HOME/my-flatpak-builds app org.gnome.Builder.json
-   $ flatpak install --user my-flatpak-builds org.gnome.Builder
-
-.. note:: After following these steps once you can omit adding the remote or creating the app directory. You'll also need to add the ``--force-clean`` option to flatpak-builder and use ``flatpak update`` rather than ``flatpak install``.
 
 .. _via-jhbuild:
 
@@ -101,7 +77,7 @@ Command Line
 
 .. code-block:: sh
 
-   $ git clone git://git.gnome.org/jhbuild.git
+   $ git clone https://gitlab.gnome.org/GNOME/jhbuild.git
    $ cd jhbuild
    $ ./autogen.sh --simple-install
    $ make

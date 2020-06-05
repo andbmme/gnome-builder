@@ -1,6 +1,6 @@
 /* gbp-deviced-device.c
  *
- * Copyright 2018 Christian Hergert <chergert@redhat.com>
+ * Copyright 2018-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gbp-deviced-device"
@@ -83,16 +85,16 @@ gbp_deviced_device_connect_cb (GObject      *object,
 
       for (const GList *iter = list; iter != NULL; iter = iter->next)
         {
-          g_autoptr(GTask) task = iter->data;
-          g_task_return_error (task, g_error_copy (error));
+          g_autoptr(IdeTask) task = iter->data;
+          ide_task_return_error (task, g_error_copy (error));
         }
     }
   else
     {
       for (const GList *iter = list; iter != NULL; iter = iter->next)
         {
-          g_autoptr(GTask) task = iter->data;
-          g_task_return_pointer (task, g_object_ref (client), g_object_unref);
+          g_autoptr(IdeTask) task = iter->data;
+          ide_task_return_pointer (task, g_object_ref (client), g_object_unref);
         }
     }
 
@@ -105,17 +107,17 @@ gbp_deviced_device_get_client_async (GbpDevicedDevice    *self,
                                      GAsyncReadyCallback  callback,
                                      gpointer             user_data)
 {
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
 
   g_assert (GBP_IS_DEVICED_DEVICE (self));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, gbp_deviced_device_get_client_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, gbp_deviced_device_get_client_async);
 
   if (self->client != NULL && self->connecting.length == 0)
     {
-      g_task_return_pointer (task, g_object_ref (self->client), g_object_unref);
+      ide_task_return_pointer (task, g_object_ref (self->client), g_object_unref);
       return;
     }
 
@@ -137,9 +139,9 @@ gbp_deviced_device_get_client_finish (GbpDevicedDevice  *self,
                                       GError           **error)
 {
   g_assert (GBP_IS_DEVICED_DEVICE (self));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_TASK (result));
 
-  return g_task_propagate_pointer (G_TASK (result), error);
+  return ide_task_propagate_pointer (IDE_TASK (result), error);
 }
 
 static void
@@ -149,34 +151,55 @@ gbp_deviced_device_get_info_connect_cb (GObject      *object,
 {
   GbpDevicedDevice *self = (GbpDevicedDevice *)object;
   g_autoptr(IdeDeviceInfo) info = NULL;
+  g_autoptr(IdeTriplet) triplet = NULL;
   g_autoptr(GError) error = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autofree gchar *arch = NULL;
   g_autofree gchar *kernel = NULL;
   g_autofree gchar *system = NULL;
+  IdeDeviceKind kind = 0;
   DevdClient *client;
 
   g_assert (GBP_IS_DEVICED_DEVICE (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   if (!(client = gbp_deviced_device_get_client_finish (self, result, &error)))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
   arch = devd_client_get_arch (client);
   kernel = devd_client_get_kernel (client);
   system = devd_client_get_system (client);
+  triplet = ide_triplet_new_with_triplet (arch, kernel, system);
 
-  info = g_object_new (IDE_TYPE_DEVICE_INFO,
-                       "arch", arch,
-                       "kernel", kernel,
-                       "system", system,
-                       NULL);
+  switch (devd_device_get_kind (self->device))
+    {
+    case DEVD_DEVICE_KIND_TABLET:
+      kind = IDE_DEVICE_KIND_TABLET;
+      break;
 
-  g_task_return_pointer (task, g_steal_pointer (&info), g_object_unref);
+    case DEVD_DEVICE_KIND_PHONE:
+      kind = IDE_DEVICE_KIND_PHONE;
+      break;
+
+    case DEVD_DEVICE_KIND_MICRO_CONTROLLER:
+      kind = IDE_DEVICE_KIND_MICRO_CONTROLLER;
+      break;
+
+    case DEVD_DEVICE_KIND_COMPUTER:
+    default:
+      kind = IDE_DEVICE_KIND_COMPUTER;
+      break;
+    }
+
+  info = ide_device_info_new ();
+  ide_device_info_set_kind (info, kind);
+  ide_device_info_set_host_triplet (info, triplet);
+
+  ide_task_return_pointer (task, g_steal_pointer (&info), g_object_unref);
 }
 
 static void
@@ -186,13 +209,13 @@ gbp_deviced_device_get_info_async (IdeDevice           *device,
                                    gpointer             user_data)
 {
   GbpDevicedDevice *self = (GbpDevicedDevice *)device;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
 
   g_assert (GBP_IS_DEVICED_DEVICE (self));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, gbp_deviced_device_get_info_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, gbp_deviced_device_get_info_async);
 
   gbp_deviced_device_get_client_async (self,
                                        cancellable,
@@ -206,9 +229,9 @@ gbp_deviced_device_get_info_finish (IdeDevice     *device,
                                     GError       **error)
 {
   g_assert (IDE_IS_DEVICE (device));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_TASK (result));
 
-  return g_task_propagate_pointer (G_TASK (result), error);
+  return ide_task_propagate_pointer (IDE_TASK (result), error);
 }
 
 static void
@@ -293,14 +316,13 @@ gbp_deviced_device_init (GbpDevicedDevice *self)
 }
 
 GbpDevicedDevice *
-gbp_deviced_device_new (IdeContext *context,
-                        DevdDevice *device)
+gbp_deviced_device_new (DevdDevice *device)
 {
   g_autofree gchar *id = NULL;
   const gchar *name;
   const gchar *icon_name;
 
-  g_return_val_if_fail (IDE_IS_CONTEXT (context), NULL);
+  g_return_val_if_fail (IDE_IS_MAIN_THREAD (), NULL);
   g_return_val_if_fail (DEVD_IS_DEVICE (device), NULL);
 
   id = g_strdup_printf ("deviced:%s", devd_device_get_id (device));
@@ -309,7 +331,6 @@ gbp_deviced_device_new (IdeContext *context,
 
   return g_object_new (GBP_TYPE_DEVICED_DEVICE,
                        "id", id,
-                       "context", context,
                        "device", device,
                        "display-name", name,
                        "icon-name", icon_name,
@@ -324,22 +345,22 @@ gbp_deviced_device_get_commit_list_apps_cb (GObject      *object,
   DevdClient *client = (DevdClient *)object;
   g_autoptr(GPtrArray) apps = NULL;
   g_autoptr(GError) error = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   const gchar *app_id;
 
   IDE_ENTRY;
 
   g_assert (DEVD_IS_CLIENT (client));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   if (!(apps = devd_client_list_apps_finish (client, result, &error)))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       IDE_EXIT;
     }
 
-  app_id = g_task_get_task_data (task);
+  app_id = ide_task_get_task_data (task);
 
   for (guint i = 0; i < apps->len; i++)
     {
@@ -351,17 +372,17 @@ gbp_deviced_device_get_commit_list_apps_cb (GObject      *object,
 
           if (commit_id != NULL)
             {
-              g_task_return_pointer (task, g_strdup (commit_id), g_free);
+              ide_task_return_pointer (task, g_strdup (commit_id), g_free);
               IDE_EXIT;
             }
         }
     }
 
-  g_task_return_new_error (task,
-                           G_IO_ERROR,
-                           G_IO_ERROR_NOT_FOUND,
-                           "No such application \"%s\"",
-                           app_id);
+  ide_task_return_new_error (task,
+                             G_IO_ERROR,
+                             G_IO_ERROR_NOT_FOUND,
+                             "No such application \"%s\"",
+                             app_id);
 
   IDE_EXIT;
 }
@@ -374,22 +395,22 @@ gbp_deviced_device_get_commit_client_cb (GObject      *object,
   GbpDevicedDevice *self = (GbpDevicedDevice *)object;
   g_autoptr(DevdClient) client = NULL;
   g_autoptr(GError) error = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   GCancellable *cancellable;
 
   IDE_ENTRY;
 
   g_assert (GBP_IS_DEVICED_DEVICE (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   if (!(client = gbp_deviced_device_get_client_finish (self, result, &error)))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       IDE_EXIT;
     }
 
-  cancellable = g_task_get_cancellable (task);
+  cancellable = ide_task_get_cancellable (task);
 
   devd_client_list_apps_async (client,
                                cancellable,
@@ -406,7 +427,7 @@ gbp_deviced_device_get_commit_async (GbpDevicedDevice    *self,
                                      GAsyncReadyCallback  callback,
                                      gpointer             user_data)
 {
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
 
   IDE_ENTRY;
 
@@ -414,9 +435,9 @@ gbp_deviced_device_get_commit_async (GbpDevicedDevice    *self,
   g_return_if_fail (app_id != NULL);
   g_return_if_fail (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, gbp_deviced_device_get_commit_async);
-  g_task_set_task_data (task, g_strdup (app_id), g_free);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, gbp_deviced_device_get_commit_async);
+  ide_task_set_task_data (task, g_strdup (app_id), g_free);
 
   gbp_deviced_device_get_client_async (self,
                                        cancellable,
@@ -436,9 +457,9 @@ gbp_deviced_device_get_commit_finish (GbpDevicedDevice  *self,
   IDE_ENTRY;
 
   g_return_val_if_fail (GBP_IS_DEVICED_DEVICE (self), NULL);
-  g_return_val_if_fail (G_IS_TASK (result), NULL);
+  g_return_val_if_fail (IDE_IS_TASK (result), NULL);
 
-  ret = g_task_propagate_pointer (G_TASK (result), error);
+  ret = ide_task_propagate_pointer (IDE_TASK (result), error);
 
   IDE_RETURN (ret);
 }
@@ -463,18 +484,18 @@ install_bundle_install_cb (GObject      *object,
 {
   DevdFlatpakService *service = (DevdFlatpakService *)object;
   g_autoptr(GError) error = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
 
   IDE_ENTRY;
 
   g_assert (DEVD_IS_FLATPAK_SERVICE (service));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   if (!devd_flatpak_service_install_bundle_finish (service, result, &error))
-    g_task_return_error (task, g_steal_pointer (&error));
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
-    g_task_return_boolean (task, TRUE);
+    ide_task_return_boolean (task, TRUE);
 
   /* TODO: Remove bundle */
 
@@ -490,7 +511,7 @@ install_bundle_put_file_cb (GObject      *object,
   DevdTransferService *service = (DevdTransferService *)object;
   g_autoptr(DevdFlatpakService) flatpak = NULL;
   g_autoptr(GError) error = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   InstallBundleState *state;
   DevdClient *client;
 
@@ -498,11 +519,11 @@ install_bundle_put_file_cb (GObject      *object,
 
   g_assert (DEVD_IS_TRANSFER_SERVICE (service));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   if (!devd_transfer_service_put_file_finish (service, result, &error))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       IDE_EXIT;
     }
 
@@ -510,17 +531,17 @@ install_bundle_put_file_cb (GObject      *object,
 
   if (!(flatpak = devd_flatpak_service_new (client, &error)))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       IDE_EXIT;
     }
 
-  state = g_task_get_task_data (task);
+  state = ide_task_get_task_data (task);
   g_assert (state != NULL);
   g_assert (state->remote_path != NULL);
 
   devd_flatpak_service_install_bundle_async (flatpak,
                                              state->remote_path,
-                                             g_task_get_cancellable (task),
+                                             ide_task_get_cancellable (task),
                                              install_bundle_install_cb,
                                              g_object_ref (task));
 
@@ -536,7 +557,7 @@ install_bundle_get_client_cb (GObject      *object,
   g_autoptr(DevdTransferService) service = NULL;
   g_autoptr(DevdClient) client = NULL;
   g_autoptr(GError) error = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GFile) file = NULL;
   InstallBundleState *state;
 
@@ -544,21 +565,21 @@ install_bundle_get_client_cb (GObject      *object,
 
   g_assert (GBP_IS_DEVICED_DEVICE (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
-  state = g_task_get_task_data (task);
+  state = ide_task_get_task_data (task);
   g_assert (state != NULL);
   g_assert (state->local_path != NULL);
 
   if (!(client = gbp_deviced_device_get_client_finish (self, result, &error)))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       IDE_EXIT;
     }
 
   if (!(service = devd_transfer_service_new (client, &error)))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       IDE_EXIT;
     }
 
@@ -568,7 +589,7 @@ install_bundle_get_client_cb (GObject      *object,
                                         file,
                                         state->remote_path,
                                         install_bundle_progress, state, NULL,
-                                        g_task_get_cancellable (task),
+                                        ide_task_get_cancellable (task),
                                         install_bundle_put_file_cb,
                                         g_object_ref (task));
 
@@ -585,7 +606,7 @@ gbp_deviced_device_install_bundle_async (GbpDevicedDevice      *self,
                                          GAsyncReadyCallback    callback,
                                          gpointer               user_data)
 {
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autofree gchar *name = NULL;
   InstallBundleState *state;
 
@@ -595,8 +616,8 @@ gbp_deviced_device_install_bundle_async (GbpDevicedDevice      *self,
   g_return_if_fail (bundle_path != NULL);
   g_return_if_fail (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, gbp_deviced_device_install_bundle_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, gbp_deviced_device_install_bundle_async);
 
   name = g_path_get_basename (bundle_path);
 
@@ -606,7 +627,7 @@ gbp_deviced_device_install_bundle_async (GbpDevicedDevice      *self,
   state->progress = progress;
   state->progress_data = progress_data;
   state->progress_data_destroy = progress_data_destroy;
-  g_task_set_task_data (task, state, (GDestroyNotify)install_bundle_state_free);
+  ide_task_set_task_data (task, state, install_bundle_state_free);
 
   gbp_deviced_device_get_client_async (self,
                                        cancellable,
@@ -626,9 +647,9 @@ gbp_deviced_device_install_bundle_finish (GbpDevicedDevice  *self,
   IDE_ENTRY;
 
   g_return_val_if_fail (GBP_IS_DEVICED_DEVICE (self), FALSE);
-  g_return_val_if_fail (G_IS_TASK (result), FALSE);
+  g_return_val_if_fail (IDE_IS_TASK (result), FALSE);
 
-  ret = g_task_propagate_boolean (G_TASK (result), error);
+  ret = ide_task_propagate_boolean (IDE_TASK (result), error);
 
   IDE_RETURN (ret);
 }

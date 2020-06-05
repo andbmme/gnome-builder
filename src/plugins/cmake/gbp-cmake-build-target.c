@@ -1,7 +1,7 @@
 /* gbp-cmake-build-target.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
- * Copyright © 2017 Martin Blanchard <tchaik@gmx.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017 Martin Blanchard <tchaik@gmx.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -15,6 +15,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gbp-cmake-build-target"
@@ -94,10 +96,7 @@ gbp_cmake_build_target_new (IdeContext *context,
   g_return_val_if_fail (G_IS_FILE (install_directory), NULL);
   g_return_val_if_fail (name != NULL, NULL);
 
-  self = g_object_new (GBP_TYPE_CMAKE_BUILD_TARGET,
-                       "context", context,
-                       NULL);
-
+  self = g_object_new (GBP_TYPE_CMAKE_BUILD_TARGET, NULL);
   g_set_object (&self->install_directory, install_directory);
   self->name = g_strdup (name);
 

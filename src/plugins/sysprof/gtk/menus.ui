@@ -5,22 +5,21 @@
       <item>
         <attribute name="id">open-sysprof-capture</attribute>
         <attribute name="after">open-file</attribute>
-        <attribute name="label" translatable="yes">Open Sysprof Capture…</attribute>
+        <attribute name="label" translatable="yes" context="menu label">Open Sysprof Capture…</attribute>
         <attribute name="action">profiler.open-profile</attribute>
       </item>
     </section>
   </menu>
-  <menu id="perspectives-menu">
-    <section id="perspectives-menu-section">
+  <menu id="ide-primary-workspace-surfaces-menu">
+    <section id="ide-primary-workspace-surfaces-menu-section">
       <item>
-        <attribute name="accel">&lt;alt&gt;3</attribute>
-        <attribute name="action">win.perspective</attribute>
-        <attribute name="after">perspective-menu-editor</attribute>
-        <attribute name="id">perspective-menu-profiler</attribute>
+        <attribute name="accel">&lt;alt&gt;2</attribute>
+        <attribute name="before">surface-menu-config</attribute>
+        <attribute name="id">surface-menu-profiler</attribute>
         <attribute name="label" translatable="yes">Profiler</attribute>
         <attribute name="role">normal</attribute>
-        <attribute name="target">profiler</attribute>
-        <attribute name="verb-icon-name">utilities-system-monitor-symbolic</attribute>
+        <attribute name="action">profiler.show</attribute>
+        <attribute name="verb-icon-name">org.gnome.Sysprof-symbolic</attribute>
       </item>
     </section>
   </menu>
@@ -29,11 +28,20 @@
       <item>
         <attribute name="id">profiler-run-handler</attribute>
         <attribute name="after">default-run-handler</attribute>
-        <attribute name="action">run-manager.run-with-handler</attribute>
-        <attribute name="target">profiler</attribute>
+        <attribute name="action">profiler.run</attribute>
         <attribute name="label" translatable="yes">Run with Profiler</attribute>
-        <attribute name="verb-icon-name">utilities-system-monitor-symbolic</attribute>
+        <attribute name="verb-icon-name">org.gnome.Sysprof-symbolic</attribute>
         <attribute name="accel">&lt;Control&gt;F8</attribute>
+      </item>
+    </section>
+  </menu>
+  <menu id="project-tree-run-with-submenu">
+    <section id="project-tree-menu-run-with-section">
+      <item>
+        <attribute name="id">project-tree-menu-profiler</attribute>
+        <attribute name="label" translatable="yes">Run with Profiler</attribute>
+        <attribute name="action">buildui.run-with-handler</attribute>
+        <attribute name="target" type="s">'profiler'</attribute>
       </item>
     </section>
   </menu>

@@ -1,6 +1,6 @@
 /* clang-plugin.c
  *
- * Copyright © 2015 Christian Hergert <christian@hergert.me>
+ * Copyright 2015-2019 Christian Hergert <christian@hergert.me>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,26 +14,33 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-#include <libpeas/peas.h>
-#include <ide.h>
+#define G_LOG_DOMAIN "clang-plugin"
 
+#include "config.h"
+
+#include <libpeas/peas.h>
+#include <libide-code.h>
+#include <libide-foundry.h>
+#include <libide-gui.h>
+
+#include "ide-clang-client.h"
 #include "ide-clang-code-indexer.h"
 #include "ide-clang-completion-item.h"
 #include "ide-clang-completion-provider.h"
 #include "ide-clang-diagnostic-provider.h"
 #include "ide-clang-highlighter.h"
 #include "ide-clang-preferences-addin.h"
-#include "ide-clang-private.h"
-#include "ide-clang-service.h"
+#include "ide-clang-rename-provider.h"
 #include "ide-clang-symbol-node.h"
 #include "ide-clang-symbol-resolver.h"
 #include "ide-clang-symbol-tree.h"
-#include "ide-clang-translation-unit.h"
 
-void
-ide_clang_register_types (PeasObjectModule *module)
+_IDE_EXTERN void
+_ide_clang_register_types (PeasObjectModule *module)
 {
   peas_object_module_register_extension_type (module,
                                               IDE_TYPE_CODE_INDEXER,
@@ -45,9 +52,6 @@ ide_clang_register_types (PeasObjectModule *module)
                                               IDE_TYPE_SYMBOL_RESOLVER,
                                               IDE_TYPE_CLANG_SYMBOL_RESOLVER);
   peas_object_module_register_extension_type (module,
-                                              IDE_TYPE_SERVICE,
-                                              IDE_TYPE_CLANG_SERVICE);
-  peas_object_module_register_extension_type (module,
                                               IDE_TYPE_DIAGNOSTIC_PROVIDER,
                                               IDE_TYPE_CLANG_DIAGNOSTIC_PROVIDER);
   peas_object_module_register_extension_type (module,
@@ -56,4 +60,7 @@ ide_clang_register_types (PeasObjectModule *module)
   peas_object_module_register_extension_type (module,
                                               IDE_TYPE_PREFERENCES_ADDIN,
                                               IDE_TYPE_CLANG_PREFERENCES_ADDIN);
+  peas_object_module_register_extension_type (module,
+                                              IDE_TYPE_RENAME_PROVIDER,
+                                              IDE_TYPE_CLANG_RENAME_PROVIDER);
 }

@@ -3,7 +3,7 @@
 #
 # html_preview.py
 #
-# Copyright © 2015 Christian Hergert <chris@dronelabs.com>
+# Copyright 2015 Christian Hergert <chris@dronelabs.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -28,10 +28,6 @@ import shutil
 import sys
 import subprocess
 import threading
-
-gi.require_version('Gtk', '3.0')
-gi.require_version('Ide', '1.0')
-gi.require_version('WebKit2', '4.0')
 
 from gi.repository import Dazzle
 from gi.repository import GLib
@@ -116,7 +112,7 @@ class HtmlPreviewData(GObject.Object, Ide.ApplicationAddin):
         assert HtmlPreviewData.MARKDOWN_VIEW_JS
 
     def do_unload(self, app):
-        for state in sphinx_states.items():
+        for state in sphinx_states.values():
             # Be extra sure that we are in the tmp dir
             tmpdir = GLib.get_tmp_dir()
             if state.builddir.startswith(tmpdir):
@@ -124,13 +120,29 @@ class HtmlPreviewData(GObject.Object, Ide.ApplicationAddin):
 
     def get_data(self, name):
         # Hold onto the GBytes to avoid copying the buffer
-        path = os.path.join('/org/gnome/builder/plugins/html_preview', name)
+        path = os.path.join('/plugins/html_preview', name)
         return Gio.resources_lookup_data(path, 0)
 
 class HtmlWorkbenchAddin(GObject.Object, Ide.WorkbenchAddin):
+    workbench = None
+
     def do_load(self, workbench):
         self.workbench = workbench
 
+    def do_unload(self, workbench):
+        self.workbench = None
+
+    def find_notif_by_id(self, id):
+        notifs = self.workbench.get_context().get_child_typed(Ide.Notifications)
+        return notifs.find_by_id(id)
+
+    def withdraw_notification(self, id):
+        notifs = self.workbench.get_context().get_child_typed(Ide.Notifications)
+        notif = notifs.find_by_id(id)
+        if notif is not None:
+            notif.withdraw()
+
+    def do_workspace_added(self, workspace):
         group = Gio.SimpleActionGroup()
 
         self.install_action = Gio.SimpleAction(name='install-docutils', enabled=True)
@@ -141,20 +153,26 @@ class HtmlWorkbenchAddin(GObject.Object, Ide.WorkbenchAddin):
         self.install_action.connect('activate', lambda *_: self.install_sphinx())
         group.insert(self.install_action)
 
-        self.workbench.insert_action_group('html-preview', group)
+        workspace.insert_action_group('html-preview', group)
 
-    def do_unload(self, workbench):
-        self.workbench = None
+    def do_workspace_removed(self, workspace):
+        workspace.insert_action_group('html-preview', None)
 
     def install_docutils(self):
         transfer = Ide.PkconTransfer(packages=['python3-docutils'])
-        manager = Gio.Application.get_default().get_transfer_manager()
+        manager = Ide.TransferManager.get_default()
+
+        notif = transfer.create_notification()
+        notif.attach(self.workbench.get_context())
 
         manager.execute_async(transfer, None, self.docutils_installed, None)
 
     def install_sphinx(self):
         transfer = Ide.PkconTransfer(packages=['python3-sphinx'])
-        manager = Gio.Application.get_default().get_transfer_manager()
+        manager = Ide.TransferManager.get_default()
+
+        notif = transfer.create_notification()
+        notif.attach(self.workbench.get_context())
 
         manager.execute_async(transfer, None, self.sphinx_installed, None)
 
@@ -169,7 +187,7 @@ class HtmlWorkbenchAddin(GObject.Object, Ide.WorkbenchAddin):
             return
 
         can_preview_rst = True
-        self.workbench.pop_message('org.gnome.builder.docutils.install')
+        self.withdraw_notification('org.gnome.builder.html-preview.docutils')
 
     def sphinx_installed(self, object, result, data):
         global can_preview_sphinx
@@ -182,21 +200,22 @@ class HtmlWorkbenchAddin(GObject.Object, Ide.WorkbenchAddin):
             return
 
         can_preview_sphinx = True
-        self.workbench.pop_message('org.gnome.builder.sphinx.install')
+        self.withdraw_notification('org.gnome.builder.html-preview.docutils')
+        self.withdraw_notification('org.gnome.builder.html-preview.sphinx')
 
-
-class HtmlPreviewAddin(GObject.Object, Ide.EditorViewAddin):
+class HtmlPreviewAddin(GObject.Object, Ide.EditorPageAddin):
     def do_load(self, view):
-        self.workbench = view.get_ancestor(Ide.Workbench)
+        self.context = Ide.widget_get_context(view)
         self.view = view
+
         self.can_preview = False
         self.sphinx_basedir = None
         self.sphinx_builddir = None
 
-        group = view.get_action_group('editor-view')
+        group = view.get_action_group('editor-page')
 
         self.action = Gio.SimpleAction(name='preview-as-html', enabled=True)
-        self.action.connect('activate', self.preview_activated)
+        self.activate_handler = self.action.connect('activate', self.preview_activated)
         group.add_action(self.action)
 
         document = view.get_buffer()
@@ -210,14 +229,17 @@ class HtmlPreviewAddin(GObject.Object, Ide.EditorViewAddin):
         controller.add_command_action('org.gnome.builder.html-preview.preview',
                                       '<Control><Alt>p',
                                       Dazzle.ShortcutPhase.CAPTURE,
-                                      'editor-view.preview-as-html')
+                                      'editor-page.preview-as-html')
 
     def do_unload(self, view):
-        group = view.get_action_group('editor-view')
+        self.action.disconnect(self.activate_handler)
+
+        group = view.get_action_group('editor-page')
         group.remove_action('preview-as-html')
 
+        self.action = None
         self.view = None
-        self.workbench = None
+        self.context = None
 
     def do_language_changed(self, language_id):
         enabled = (language_id in ('html', 'markdown', 'rst'))
@@ -228,7 +250,7 @@ class HtmlPreviewAddin(GObject.Object, Ide.EditorViewAddin):
         if self.lang_id == 'rst':
             if not self.sphinx_basedir:
                 document = self.view.get_buffer()
-                path = document.get_file().get_file().get_path()
+                path = document.get_file().get_path()
                 self.sphinx_basedir = self.search_sphinx_base_dir(path)
 
             if self.sphinx_basedir:
@@ -268,13 +290,13 @@ class HtmlPreviewAddin(GObject.Object, Ide.EditorViewAddin):
                 return
 
         document = view.get_buffer()
-        web_view = HtmlPreviewView(document,
+        web_view = HtmlPreviewPage(document,
                                    self.sphinx_basedir,
                                    self.sphinx_builddir,
                                    visible=True)
 
-        column = view.get_ancestor(Ide.LayoutGridColumn)
-        grid = column.get_ancestor(Ide.LayoutGrid)
+        column = view.get_ancestor(Ide.GridColumn)
+        grid = column.get_ancestor(Ide.Grid)
         index = grid.child_get_property(column, 'index')
 
         # If we are past first stack, use the 0 column stack
@@ -290,9 +312,7 @@ class HtmlPreviewAddin(GObject.Object, Ide.EditorViewAddin):
         self.action.set_enabled(True)
 
     def search_sphinx_base_dir(self, path):
-        context = self.workbench.get_context()
-        vcs = context.get_vcs()
-        working_dir = vcs.get_working_directory().get_path()
+        working_dir = self.context.ref_workdir()
 
         try:
             if os.path.commonpath([working_dir, path]) != working_dir:
@@ -316,29 +336,32 @@ class HtmlPreviewAddin(GObject.Object, Ide.EditorViewAddin):
             folder = os.path.dirname(folder)
 
     def show_missing_docutils_message(self, view):
-        message = Ide.WorkbenchMessage(
-            id='org.gnome.builder.docutils.install',
+        notif = Ide.Notification(
+            id='org.gnome.builder.html-preview.docutils',
             title=_('Your computer is missing python3-docutils'),
-            show_close_button=True,
-            visible=True)
-
-        message.add_action(_('Install'), 'html-preview.install-docutils')
-        self.workbench.push_message(message)
+            body=_('This package is necessary to provide previews of markup-based documents.'),
+            icon_name='dialog-warning-symbolic',
+            urgent=True)
+        notif.add_button(_('Install Package'), None, 'html-preview.install-docutils')
+        notif.attach(self.context)
 
     def show_missing_sphinx_message(self, view):
-        message = Ide.WorkbenchMessage(
-            id='org.gnome.builder.sphinx.install',
+        notif = Ide.Notification(
+            id='org.gnome.builder.html-preview.sphinx',
             title=_('Your computer is missing python3-sphinx'),
-            show_close_button=True,
-            visible=True)
+            body=_('This package is necessary to provide previews of markup-based documents.'),
+            icon_name='dialog-warning-symbolic',
+            urgent=True)
+        notif.add_button(_('Install Package'), None, 'html-preview.install-sphinx')
+        notif.attach(self.context)
 
-        message.add_action(_('Install'), 'html-preview.install-sphinx')
-        self.workbench.push_message(message)
-
-
-class HtmlPreviewView(Ide.LayoutView):
+class HtmlPreviewPage(Ide.Page):
     markdown = False
     rst = False
+
+    title_handler = 0
+    changed_handler = 0
+    destroy_handler = 0
 
     def __init__(self, document, sphinx_basedir, sphinx_builddir, *args, **kwargs):
         global old_open
@@ -349,8 +372,11 @@ class HtmlPreviewView(Ide.LayoutView):
         self.sphinx_builddir = sphinx_builddir
         self.document = document
 
-        self.webview = WebKit2.WebView(visible=True, expand=True)
+        self.webview = WebKit2.WebView()
+        self.webview.props.expand = True
+        self.webview.connect('decide-policy', self.on_decide_policy_cb)
         self.add(self.webview)
+        self.webview.show()
 
         settings = self.webview.get_settings()
         settings.enable_html5_local_storage = False
@@ -363,18 +389,48 @@ class HtmlPreviewView(Ide.LayoutView):
             elif id == 'rst':
                 self.rst = True
 
-        document.connect('notify::title', self.on_title_changed)
-        document.connect('changed', self.on_changed)
-        self.webview.connect('destroy', self.web_view_destroyed)
+        self.title_handler = document.connect('notify::title', self.on_title_changed)
+        self.changed_handler = document.connect('changed', self.on_changed)
+        self.destroy_handler = self.webview.connect('destroy', self.web_view_destroyed)
 
         self.on_changed(document)
         self.on_title_changed(document)
 
+    def on_decide_policy_cb(self, webview, decision, decision_type):
+        """Handle policy decisions from webview"""
+
+        if decision_type == WebKit2.PolicyDecisionType.NAVIGATION_ACTION:
+            # Don't allow navigating away from the current page
+
+            action = decision.get_navigation_action()
+            request = action.get_request()
+            uri = request.get_uri()
+
+            # print(">>> URI = ", uri)
+
+            if uri != self.document.get_file().get_uri() \
+            and 'gnome-builder-sphinx' not in uri:
+                toplevel = self.webview.get_toplevel()
+                Ide.gtk_show_uri_on_window(toplevel, uri, GLib.get_monotonic_time())
+                decision.ignore()
+                return True
+
+        return False
+
     def on_title_changed(self, buffer):
-        self.set_title("%s %s" % (buffer.get_title(), _("(Preview)")))
+        self.set_title("%s %s" % (buffer.dup_title(), _("(Preview)")))
 
     def web_view_destroyed(self, web_view):
-        self.document.disconnect_by_func(self.on_changed)
+        self.document.disconnect(self.title_handler)
+        self.document.disconnect(self.changed_handler)
+        web_view.disconnect(self.destroy_handler)
+
+        self.title_handler = 0
+        self.changed_handler = 0
+        self.destroy_handler = 0
+
+        self.document = None
+        self.webview = None
 
     def get_markdown(self, text):
         text = text.replace("\"", "\\\"").replace("\n", "\\n")
@@ -411,7 +467,7 @@ class HtmlPreviewView(Ide.LayoutView):
                          name='sphinx-rst-thread').start()
 
     def purge_cache(self, basedir, builddir, document):
-        path = document.get_file().get_file().get_path()
+        path = document.get_file().get_path()
         rel_path = os.path.relpath(path, start=basedir)
         rel_path_doctree = os.path.splitext(rel_path)[0] + '.doctree'
         doctree_path = os.path.join(builddir, '.doctrees', rel_path_doctree)
@@ -426,22 +482,31 @@ class HtmlPreviewView(Ide.LayoutView):
     def get_sphinx_rst_worker(self, task, text, path, basedir, builddir):
         add_override_file(path, text)
 
+        if GLib.find_program_in_path('sphinx-build-3'):
+            program = 'sphinx-build-3'
+        else:
+            program = 'sphinx-build'
+
         rel_path = os.path.relpath(path, start=basedir)
-        command = ['sphinx-build', '-Q', '-b', 'html', basedir, builddir, path]
+        command = [program, '-Q', '-b', 'html', basedir, builddir, path]
 
         rel_path_html = os.path.splitext(rel_path)[0] + '.html'
         builddir_path = os.path.join(builddir, rel_path_html)
 
-        result = not sphinx.build_main(command)
-        remove_override_file(path)
+        try:
+            launcher = Ide.SubprocessLauncher.new(0) # Gio.SubprocessFlags.STDOUT_SILENCE |
+                                                     # Gio.SubprocessFlags.STDERR_SILENCE)
+            launcher.push_args(command)
+            subprocess = launcher.spawn()
+            subprocess.wait_check()
 
-        if not result:
-            task.builddir_path = None
-            task.return_error(GLib.Error('\'sphinx-build\' command error for {}'.format(path)))
-            return
+            task.builddir_path = builddir_path
+            task.return_boolean(True)
+        except Exception as ex:
+            task.return_error(GLib.Error(ex))
+        finally:
+            remove_override_file(path)
 
-        task.builddir_path = builddir_path
-        task.return_boolean(True)
 
     def get_sphinx_rst_finish(self, result):
         succes = result.propagate_boolean()
@@ -465,7 +530,7 @@ class HtmlPreviewView(Ide.LayoutView):
             state.need_build = True
             return
 
-        gfile = self.document.get_file().get_file()
+        gfile = self.document.get_file()
         base_uri = gfile.get_uri()
 
         begin, end = self.document.get_bounds()

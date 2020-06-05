@@ -1,6 +1,6 @@
 /* gstyle-utils.h
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #pragma once
@@ -85,10 +87,17 @@ gstyle_utils_cmp_border (GtkBorder border1,
     return TRUE;
 }
 
-#define gstyle_clear_weak_pointer(ptr) \
-  (*(ptr) ? (g_object_remove_weak_pointer((GObject*)*(ptr), (gpointer*)ptr),*(ptr)=NULL,1) : 0)
+#define gstyle_clear_weak_pointer(ptr) g_clear_weak_pointer(ptr)
+#define gstyle_set_weak_pointer(ptr,obj) g_set_weak_pointer(ptr,obj)
 
-#define gstyle_set_weak_pointer(ptr,obj) \
-  ((obj!=*(ptr))?(gstyle_clear_weak_pointer(ptr),*(ptr)=obj,((obj)?g_object_add_weak_pointer((GObject*)obj,(gpointer*)ptr),NULL:NULL),1):0)
+/* A more type-correct form of gstyle_clear_pointer(), to help find bugs. */
+#define gstyle_clear_pointer(pptr, free_func)                   \
+  G_STMT_START {                                             \
+    G_STATIC_ASSERT (sizeof (*(pptr)) == sizeof (gpointer)); \
+    typeof(*(pptr)) _dzl_tmp_clear = *(pptr);                \
+    *(pptr) = NULL;                                          \
+    if (_dzl_tmp_clear)                                      \
+      free_func (_dzl_tmp_clear);                            \
+  } G_STMT_END
 
 G_END_DECLS

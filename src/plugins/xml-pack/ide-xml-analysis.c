@@ -1,6 +1,6 @@
 /* ide-xml-analysis.c
  *
- * Copyright © 2017 Sebastien Lafargue <slafargue@gnome.org>
+ * Copyright 2017 Sebastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,7 +14,10 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
+
 #include "ide-xml-analysis.h"
 
 G_DEFINE_BOXED_TYPE (IdeXmlAnalysis, ide_xml_analysis, ide_xml_analysis_ref, ide_xml_analysis_unref)
@@ -79,8 +82,7 @@ ide_xml_analysis_set_diagnostics (IdeXmlAnalysis *self,
   g_return_if_fail (self != NULL);
   g_return_if_fail (diagnostics != NULL);
 
-  g_clear_pointer (&self->diagnostics, ide_diagnostics_unref);
-  self->diagnostics = ide_diagnostics_ref (diagnostics);
+  g_set_object (&self->diagnostics, diagnostics);
 }
 
 void
@@ -90,8 +92,7 @@ ide_xml_analysis_set_root_node (IdeXmlAnalysis   *self,
   g_return_if_fail (self != NULL);
   g_return_if_fail (root_node != NULL);
 
-  g_clear_object (&self->root_node);
-  self->root_node = g_object_ref (root_node);
+  g_set_object (&self->root_node, root_node);
 }
 
 void
@@ -100,10 +101,12 @@ ide_xml_analysis_set_schemas (IdeXmlAnalysis *self,
 {
   g_return_if_fail (self != NULL);
 
-  g_clear_pointer (&self->schemas, g_ptr_array_unref);
-
-  if (schemas != NULL)
-    self->schemas = g_ptr_array_ref (schemas);
+  if (self->schemas != schemas)
+    {
+      g_clear_pointer (&self->schemas, g_ptr_array_unref);
+      if (schemas != NULL)
+        self->schemas = g_ptr_array_ref (schemas);
+    }
 }
 
 void
@@ -134,8 +137,7 @@ ide_xml_analysis_free (IdeXmlAnalysis *self)
   g_assert_cmpint (self->ref_count, ==, 0);
 
   g_clear_object (&self->root_node);
-  g_clear_pointer (&self->diagnostics, ide_diagnostics_unref);
-
+  g_clear_object (&self->diagnostics);
   g_slice_free (IdeXmlAnalysis, self);
 }
 
@@ -143,7 +145,7 @@ IdeXmlAnalysis *
 ide_xml_analysis_ref (IdeXmlAnalysis *self)
 {
   g_return_val_if_fail (self, NULL);
-  g_return_val_if_fail (self->ref_count, NULL);
+  g_return_val_if_fail (self->ref_count > 0, NULL);
 
   g_atomic_int_inc (&self->ref_count);
 
@@ -154,7 +156,7 @@ void
 ide_xml_analysis_unref (IdeXmlAnalysis *self)
 {
   g_return_if_fail (self);
-  g_return_if_fail (self->ref_count);
+  g_return_if_fail (self->ref_count > 0);
 
   if (g_atomic_int_dec_and_test (&self->ref_count))
     ide_xml_analysis_free (self);

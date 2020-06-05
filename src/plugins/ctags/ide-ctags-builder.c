@@ -1,6 +1,6 @@
 /* ide-ctags-builder.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,9 +14,13 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "ide-ctags-builder"
+
+#include <libide-vcs.h>
 
 #include "ide-ctags-builder.h"
 
@@ -61,14 +65,14 @@ ide_ctags_builder_class_init (IdeCtagsBuilderClass *klass)
    *       if files are ignored via the VCS.
    */
 
-  g_hash_table_insert (ignored, ".git", NULL);
-  g_hash_table_insert (ignored, ".bzr", NULL);
-  g_hash_table_insert (ignored, ".svn", NULL);
-  g_hash_table_insert (ignored, ".flatpak-builder", NULL);
-  g_hash_table_insert (ignored, ".libs", NULL);
-  g_hash_table_insert (ignored, ".deps", NULL);
-  g_hash_table_insert (ignored, "autom4te.cache", NULL);
-  g_hash_table_insert (ignored, "build-aux", NULL);
+  g_hash_table_insert (ignored, (gchar *)".git", NULL);
+  g_hash_table_insert (ignored, (gchar *)".bzr", NULL);
+  g_hash_table_insert (ignored, (gchar *)".svn", NULL);
+  g_hash_table_insert (ignored, (gchar *)".flatpak-builder", NULL);
+  g_hash_table_insert (ignored, (gchar *)".libs", NULL);
+  g_hash_table_insert (ignored, (gchar *)".deps", NULL);
+  g_hash_table_insert (ignored, (gchar *)"autom4te.cache", NULL);
+  g_hash_table_insert (ignored, (gchar *)"build-aux", NULL);
 }
 
 static void
@@ -77,13 +81,9 @@ ide_ctags_builder_init (IdeCtagsBuilder *self)
 }
 
 IdeTagsBuilder *
-ide_ctags_builder_new (IdeContext *context)
+ide_ctags_builder_new (void)
 {
-  g_return_val_if_fail (IDE_IS_CONTEXT (context), NULL);
-
-  return g_object_new (IDE_TYPE_CTAGS_BUILDER,
-                       "context", context,
-                       NULL);
+  return g_object_new (IDE_TYPE_CTAGS_BUILDER, NULL);
 }
 
 static gboolean
@@ -106,17 +106,20 @@ ide_ctags_builder_build (IdeCtagsBuilder *self,
   g_autofree gchar *options_path = NULL;
   g_autofree gchar *tags_path = NULL;
   g_autoptr(GString) filenames = NULL;
+  g_autoptr(IdeVcs) vcs = NULL;
   GOutputStream *stdin_stream;
   IdeContext *context;
-  IdeVcs *vcs;
   gpointer infoptr;
 
   g_assert (IDE_IS_CTAGS_BUILDER (self));
   g_assert (G_IS_FILE (directory));
   g_assert (G_IS_FILE (destination));
 
+  if (g_cancellable_is_cancelled (cancellable))
+    return FALSE;
+
   context = ide_object_get_context (IDE_OBJECT (self));
-  vcs = ide_context_get_vcs (context);
+  vcs = ide_object_get_child_typed (IDE_OBJECT (context), IDE_TYPE_VCS);
 
   dest_dir = g_file_get_path (destination);
   if (0 != g_mkdir_with_parents (dest_dir, 0750))
@@ -139,6 +142,10 @@ ide_ctags_builder_build (IdeCtagsBuilder *self,
   ide_subprocess_launcher_set_cwd (launcher, cwd);
   ide_subprocess_launcher_setenv (launcher, "TMPDIR", cwd, TRUE);
   ide_subprocess_launcher_set_stdout_file_path (launcher, tags_path);
+
+#ifdef __linux__
+  ide_subprocess_launcher_push_argv (launcher, "nice");
+#endif
 
   ide_subprocess_launcher_push_argv (launcher, ctags);
   ide_subprocess_launcher_push_argv (launcher, "-f");
@@ -194,7 +201,7 @@ ide_ctags_builder_build (IdeCtagsBuilder *self,
   if (enumerator == NULL)
     IDE_GOTO (finish_subprocess);
 
-  while (NULL != (infoptr = g_file_enumerator_next_file (enumerator, cancellable, &error)))
+  while ((infoptr = g_file_enumerator_next_file (enumerator, cancellable, &error)))
     {
       g_autoptr(GFileInfo) info = infoptr;
       const gchar *name;
@@ -242,6 +249,10 @@ finish_subprocess:
       g_assert (G_IS_FILE (child));
       g_assert (G_IS_FILE (dest_child));
 
+      if (ide_object_in_destruction (IDE_OBJECT (self)) ||
+          g_cancellable_is_cancelled (cancellable))
+        return FALSE;
+
       if (ide_vcs_is_ignored (vcs, child, NULL))
         continue;
 
@@ -253,7 +264,7 @@ finish_subprocess:
 }
 
 static void
-ide_ctags_builder_build_worker (GTask        *task,
+ide_ctags_builder_build_worker (IdeTask      *task,
                                 gpointer      source_object,
                                 gpointer      task_data_ptr,
                                 GCancellable *cancellable)
@@ -265,7 +276,7 @@ ide_ctags_builder_build_worker (GTask        *task,
 
   IDE_ENTRY;
 
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
   g_assert (IDE_IS_CTAGS_BUILDER (source_object));
   g_assert (G_IS_FILE (task_data->directory));
 
@@ -281,7 +292,7 @@ ide_ctags_builder_build_worker (GTask        *task,
                            task_data->recursive,
                            cancellable);
 
-  g_task_return_boolean (task, TRUE);
+  ide_task_return_boolean (task, TRUE);
 
   IDE_EXIT;
 }
@@ -295,18 +306,32 @@ ide_ctags_builder_build_async (IdeTagsBuilder      *builder,
                                gpointer             user_data)
 {
   IdeCtagsBuilder *self = (IdeCtagsBuilder *)builder;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autoptr(GSettings) settings = NULL;
   g_autofree gchar *destination_path = NULL;
   g_autofree gchar *relative_path = NULL;
+  g_autoptr(GFile) workdir = NULL;
   BuildTaskData *task_data;
   IdeContext *context;
-  GFile *workdir;
 
   IDE_ENTRY;
 
   g_assert (IDE_IS_CTAGS_BUILDER (self));
   g_assert (G_IS_FILE (directory_or_file));
+
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, ide_ctags_builder_build_async);
+  ide_task_set_priority (task, G_PRIORITY_LOW + 200);
+
+  if (ide_object_in_destruction (IDE_OBJECT (self)) ||
+      !(context = ide_object_get_context (IDE_OBJECT (self))))
+    {
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_CANCELLED,
+                                 "The operation was cancelled");
+      IDE_EXIT;
+    }
 
   settings = g_settings_new ("org.gnome.builder.code-insight");
 
@@ -322,17 +347,14 @@ ide_ctags_builder_build_async (IdeTagsBuilder      *builder,
    * reused even between configuration changes. Primarily, we want to avoid
    * putting things in the source tree.
    */
-  context = ide_object_get_context (IDE_OBJECT (self));
-  workdir = ide_vcs_get_working_directory (ide_context_get_vcs (context));
+  workdir = ide_context_ref_workdir (context);
   relative_path = g_file_get_relative_path (workdir, directory_or_file);
   destination_path = ide_context_cache_filename (context, "ctags", relative_path, NULL);
   task_data->destination = g_file_new_for_path (destination_path);
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, ide_ctags_builder_build_async);
-  g_task_set_priority (task, G_PRIORITY_LOW);
-  g_task_set_task_data (task, task_data, build_task_data_free);
-  ide_thread_pool_push_task (IDE_THREAD_POOL_INDEXER, task, ide_ctags_builder_build_worker);
+  ide_task_set_task_data (task, task_data, build_task_data_free);
+  ide_task_set_kind (task, IDE_TASK_KIND_INDEXER);
+  ide_task_run_in_thread (task, ide_ctags_builder_build_worker);
 
   IDE_EXIT;
 }
@@ -347,9 +369,9 @@ ide_ctags_builder_build_finish (IdeTagsBuilder  *builder,
   IDE_ENTRY;
 
   g_return_val_if_fail (IDE_IS_CTAGS_BUILDER (builder), FALSE);
-  g_return_val_if_fail (G_IS_TASK (result), FALSE);
+  g_return_val_if_fail (IDE_IS_TASK (result), FALSE);
 
-  ret = g_task_propagate_boolean (G_TASK (result), error);
+  ret = ide_task_propagate_boolean (IDE_TASK (result), error);
 
   IDE_RETURN (ret);
 }

@@ -1,6 +1,6 @@
 /* ide-vcs-config.c
  *
- * Copyright © 2016 Akshaya Kakkilaya <akshaya.kakkilaya@gmail.com>
+ * Copyright 2016 Akshaya Kakkilaya <akshaya.kakkilaya@gmail.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,11 +14,18 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-#include "vcs/ide-vcs-config.h"
+#define G_LOG_DOMAIN "ide-vcs-config"
 
-G_DEFINE_INTERFACE (IdeVcsConfig, ide_vcs_config, G_TYPE_OBJECT)
+#include "config.h"
+
+#include "ide-vcs-config.h"
+#include "ide-vcs-enums.h"
+
+G_DEFINE_INTERFACE (IdeVcsConfig, ide_vcs_config, IDE_TYPE_OBJECT)
 
 static void
 ide_vcs_config_default_init (IdeVcsConfigInterface *iface)

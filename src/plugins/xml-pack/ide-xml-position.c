@@ -1,6 +1,6 @@
 /* ide-xml-position.c
  *
- * Copyright © 2017 Sebastien Lafargue <slafargue@gnome.org>
+ * Copyright 2017 Sebastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,7 +14,11 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
+
+#include <dazzle.h>
 
 #include "ide-xml-position.h"
 
@@ -110,7 +114,7 @@ IdeXmlPosition *
 ide_xml_position_ref (IdeXmlPosition *self)
 {
   g_return_val_if_fail (self, NULL);
-  g_return_val_if_fail (self->ref_count, NULL);
+  g_return_val_if_fail (self->ref_count > 0, NULL);
 
   g_atomic_int_inc (&self->ref_count);
 
@@ -121,7 +125,7 @@ void
 ide_xml_position_unref (IdeXmlPosition *self)
 {
   g_return_if_fail (self);
-  g_return_if_fail (self->ref_count);
+  g_return_if_fail (self->ref_count > 0);
 
   if (g_atomic_int_dec_and_test (&self->ref_count))
     ide_xml_position_free (self);
@@ -178,7 +182,7 @@ ide_xml_position_set_siblings    (IdeXmlPosition   *self,
 const gchar *
 ide_xml_position_kind_get_str (IdeXmlPositionKind kind)
 {
-  const gchar *kind_str;
+  const gchar *kind_str = NULL;
 
   switch (kind)
     {
@@ -205,10 +209,10 @@ ide_xml_position_kind_get_str (IdeXmlPositionKind kind)
   return kind_str;
 }
 
-const gchar *
+static const gchar *
 ide_xml_position_detail_get_str (IdeXmlPositionDetail detail)
 {
-  const gchar *detail_str;
+  const gchar *detail_str = NULL;
 
   switch (detail)
     {

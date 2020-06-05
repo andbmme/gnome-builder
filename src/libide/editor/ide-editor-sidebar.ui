@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <interface>
-  <template class="IdeEditorSidebar" parent="IdeLayoutPane">
+  <template class="IdeEditorSidebar" parent="IdePanel">
     <child>
       <object class="GtkBox" id="box">
         <property name="vexpand">true</property>
@@ -35,18 +35,6 @@
                         <style>
                           <class name="dim-label"/>
                           <class name="title"/>
-                        </style>
-                      </object>
-                    </child>
-                    <child>
-                      <object class="DzlMenuButton">
-                        <property name="margin-right">6</property>
-                        <property name="show-accels">true</property>
-                        <property name="icon-name">pan-down-symbolic</property>
-                        <property name="menu-id">pages-menu</property>
-                        <property name="visible">true</property>
-                        <style>
-                          <class name="flat-menu-button"/>
                         </style>
                       </object>
                     </child>

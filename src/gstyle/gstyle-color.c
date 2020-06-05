@@ -1,6 +1,6 @@
 /* gstyle-color.c
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This file is free software; you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as
@@ -116,10 +116,13 @@ gstyle_color_to_hsla (GstyleColor *self,
 static gchar *
 truncate_trailing_zeros (gdouble number)
 {
-  gint c = g_snprintf(TRUNCATE_BUF, 6, "%.2f", number);
+  guint i = (guint)number;
+  guint f = (number - i) * 100;
+  gint c = g_snprintf (TRUNCATE_BUF, 5, "%d.%d", i, f);
 
+  /* Format the number string, e.g. "0.50" => "0.5"; "1.0" => "1" */
   --c;
-  while(TRUNCATE_BUF[c] == '0')
+  while (TRUNCATE_BUF[c] == '0')
     c--;
 
   if (TRUNCATE_BUF[c] == '.')
@@ -153,9 +156,9 @@ gstyle_color_to_string (GstyleColor     *self,
   gdouble hue = 0.0;
   gdouble saturation = 0.0;
   gdouble lightness = 0.0;
-  guint red = 0.0;
-  guint green = 0.0;
-  guint blue = 0.0;
+  guint red = 0;
+  guint green = 0;
+  guint blue = 0;
 
   g_return_val_if_fail (GSTYLE_IS_COLOR (self), NULL);
 
@@ -1213,7 +1216,7 @@ gstyle_color_finalize (GObject *object)
 {
   GstyleColor *self = GSTYLE_COLOR (object);
 
-  g_clear_pointer (&self->name, g_free);
+  gstyle_clear_pointer (&self->name, g_free);
 
   G_OBJECT_CLASS (gstyle_color_parent_class)->finalize (object);
 }

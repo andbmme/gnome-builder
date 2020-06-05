@@ -1,6 +1,6 @@
 /* gbp-qemu-device-provider.c
  *
- * Copyright 2018 Christian Hergert <chergert@redhat.com>
+ * Copyright 2018-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -43,8 +43,34 @@ static const struct {
 };
 
 #ifdef __linux__
+static gboolean
+has_flag (const gchar *contents,
+          gsize        len,
+          gchar        flag)
+{
+  IdeLineReader reader;
+  const gchar *line;
+  gsize line_len = 0;
+
+  ide_line_reader_init (&reader, (gchar *)contents, len);
+
+  while ((line = ide_line_reader_next (&reader, &line_len)))
+    {
+      if (strncmp (line, "flags: ", 7) == 0)
+        {
+          for (gsize i = 7; i < line_len; i++)
+            {
+              if (line[i] == flag)
+                return TRUE;
+            }
+        }
+    }
+
+  return FALSE;
+}
+
 static void
-gbp_qemu_device_provider_load_worker (GTask        *task,
+gbp_qemu_device_provider_load_worker (IdeTask      *task,
                                       gpointer      source_object,
                                       gpointer      task_data,
                                       GCancellable *cancellable)
@@ -53,13 +79,16 @@ gbp_qemu_device_provider_load_worker (GTask        *task,
   g_autofree gchar *status = NULL;
   g_autoptr(GError) error = NULL;
   g_autoptr(GPtrArray) devices = NULL;
-  IdeContext *context;
+  GbpQemuDeviceProvider *self;
 
   IDE_ENTRY;
 
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
   g_assert (GBP_IS_QEMU_DEVICE_PROVIDER (source_object));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
+
+  self = ide_task_get_source_object (task);
+  g_assert (GBP_IS_QEMU_DEVICE_PROVIDER (self));
 
   devices = g_ptr_array_new_with_free_func (g_object_unref);
 
@@ -69,37 +98,35 @@ gbp_qemu_device_provider_load_worker (GTask        *task,
 
   if (!ide_g_host_file_get_contents ("/proc/mounts", &mounts, NULL, &error))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       IDE_EXIT;
     }
 
   /* @mounts is guaranteed to have a \0 suffix */
   if (strstr (mounts, "binfmt") == NULL)
     {
-      g_task_return_new_error (task,
-                               G_IO_ERROR,
-                               G_IO_ERROR_FAILED,
-                               "binfmt is missing from /proc/mounts");
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_FAILED,
+                                 "binfmt is missing from /proc/mounts");
       IDE_EXIT;
     }
 
   if (!ide_g_host_file_get_contents  ("/proc/sys/fs/binfmt_misc/status", &status, NULL, &error))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       IDE_EXIT;
     }
 
   /* @status is guaranteed to have a \0 suffix */
   if (!g_str_equal (g_strstrip (status), "enabled"))
     {
-      g_task_return_new_error (task,
-                               G_IO_ERROR,
-                               G_IO_ERROR_FAILED,
-                               "binfmt hooks are not currently enabled");
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_FAILED,
+                                 "binfmt hooks are not currently enabled");
       IDE_EXIT;
     }
-
-  context = ide_object_get_context (source_object);
 
   /* Now locate which of the machines are registered. Qemu has a huge
    * list of these, so we only check for ones we think are likely to
@@ -113,33 +140,39 @@ gbp_qemu_device_provider_load_worker (GTask        *task,
 
       path = g_build_filename ("/proc/sys/fs/binfmt_misc", machines[i].filename, NULL);
 
-      /* First line of file should be "enabled\n" */
+      /* First line of file should be "enabled\n". We also require the
+       * 'F' flag so that the kernel opens the interpreter and passes the
+       * fd across to execute within the subprocess.
+       */
       if (ide_g_host_file_get_contents (path, &contents, &len, NULL) &&
-          strncmp (contents, "enabled\n", 8) == 0)
+          strncmp (contents, "enabled\n", 8) == 0 &&
+          has_flag (contents, len, 'F'))
         {
           g_autoptr(IdeLocalDevice) device = NULL;
+          g_autoptr(IdeTriplet) triplet = NULL;
           g_autofree gchar *display_name = NULL;
 
-          IDE_TRACE_MSG ("Discovered QEMU device \"%s\"\n", machines[i].arch);
+          g_debug ("Discovered QEMU device \"%s\"", machines[i].arch);
 
           /* translators: first %s is replaced with hostname, second %s with the CPU architecture */
           display_name = g_strdup_printf (_("My Computer (%s) %s"),
                                           g_get_host_name (),
                                           machines[i].suffix);
 
+          triplet = ide_triplet_new (machines[i].arch);
           device = g_object_new (IDE_TYPE_LOCAL_DEVICE,
                                  "id", machines[i].filename,
-                                 "arch", machines[i].arch,
-                                 "context", context,
+                                 "triplet", triplet,
                                  "display-name", display_name,
                                  NULL);
+          ide_object_append (IDE_OBJECT (self), IDE_OBJECT (device));
           g_ptr_array_add (devices, g_steal_pointer (&device));
         }
     }
 
-  g_task_return_pointer (task,
-                         g_steal_pointer (&devices),
-                         (GDestroyNotify)g_ptr_array_unref);
+  ide_task_return_pointer (task,
+                           g_steal_pointer (&devices),
+                           g_ptr_array_unref);
 
   IDE_EXIT;
 }
@@ -151,23 +184,23 @@ gbp_qemu_device_provider_load_async (IdeDeviceProvider   *provider,
                                      GAsyncReadyCallback  callback,
                                      gpointer             user_data)
 {
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
 
   IDE_ENTRY;
 
   g_assert (GBP_IS_QEMU_DEVICE_PROVIDER (provider));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (provider, cancellable, callback, user_data);
-  g_task_set_source_tag (task, gbp_qemu_device_provider_load_async);
+  task = ide_task_new (provider, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, gbp_qemu_device_provider_load_async);
 
 #ifdef __linux__
-  g_task_run_in_thread (task, gbp_qemu_device_provider_load_worker);
+  ide_task_run_in_thread (task, gbp_qemu_device_provider_load_worker);
 #else
-  g_task_return_new_error (task,
-                           G_IO_ERROR,
-                           G_IO_ERROR_NOT_SUPPORTED,
-                           "Qemu device hooks are only supported on Linux");
+  ide_task_return_new_error (task,
+                             G_IO_ERROR,
+                             G_IO_ERROR_NOT_SUPPORTED,
+                             "Qemu device hooks are only supported on Linux");
 #endif
 
   IDE_EXIT;
@@ -185,7 +218,7 @@ gbp_qemu_device_provider_load_finish (IdeDeviceProvider  *provider,
   g_assert (IDE_IS_DEVICE_PROVIDER (provider));
   g_assert (G_IS_ASYNC_RESULT (result));
 
-  if ((devices = g_task_propagate_pointer (G_TASK (result), error)))
+  if ((devices = ide_task_propagate_pointer (IDE_TASK (result), error)))
     {
       for (guint i = 0; i < devices->len; i++)
         {

@@ -1,6 +1,6 @@
 /* c-parse-helper.c
  *
- * Copyright © 2014 Christian Hergert <christian@hergert.me>
+ * Copyright 2014-2019 Christian Hergert <christian@hergert.me>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "c-parser"
@@ -27,9 +29,9 @@ parameter_free (Parameter *p)
 {
   if (p)
     {
-      g_free (p->name);
-      g_free (p->type);
-      g_free (p);
+      g_clear_pointer (&p->name, g_free);
+      g_clear_pointer (&p->type, g_free);
+      g_slice_free (Parameter, p);
     }
 }
 
@@ -38,7 +40,7 @@ parameter_copy (const Parameter *src)
 {
   Parameter *copy;
 
-  copy = g_new0 (Parameter, 1);
+  copy = g_slice_new0 (Parameter);
   copy->name = g_strdup (src->name);
   copy->type = g_strdup (src->type);
   copy->ellipsis = src->ellipsis;

@@ -1,6 +1,6 @@
 /* ide-vcs-monitor.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,28 +14,35 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "ide-vcs-monitor"
 
+#include "config.h"
+
 #include <dazzle.h>
+#include <libide-core.h>
 
-#include "ide-context.h"
-#include "ide-debug.h"
-
-#include "vcs/ide-vcs.h"
-#include "vcs/ide-vcs-file-info.h"
-#include "vcs/ide-vcs-monitor.h"
+#include "ide-vcs.h"
+#include "ide-vcs-file-info.h"
+#include "ide-vcs-monitor.h"
 
 struct _IdeVcsMonitor
 {
   IdeObject                parent_instance;
 
   GFile                   *root;
+  IdeVcs                  *vcs;
+  DzlSignalGroup          *vcs_signals;
   DzlRecursiveFileMonitor *monitor;
+  DzlSignalGroup          *monitor_signals;
   GHashTable              *status_by_file;
 
   guint                    cache_source;
+
+  guint64                  last_change_seq;
 
   guint                    busy : 1;
 };
@@ -51,6 +58,7 @@ enum {
 enum {
   PROP_0,
   PROP_ROOT,
+  PROP_VCS,
   N_PROPS
 };
 
@@ -58,13 +66,14 @@ static GParamSpec *properties [N_PROPS];
 static guint signals [N_SIGNALS];
 
 static void
-ide_vcs_monitor_add_parents (GHashTable       *hash,
-                             GFile            *file,
-                             GFile            *toplevel,
-                             IdeVcsFileStatus  status)
+ide_vcs_monitor_add_parents_locked (GHashTable       *hash,
+                                    GFile            *file,
+                                    GFile            *toplevel,
+                                    IdeVcsFileStatus  status)
 {
   GFile *parent;
 
+  g_assert (IDE_IS_MAIN_THREAD ());
   g_assert (hash != NULL);
   g_assert (G_IS_FILE (file));
   g_assert (G_IS_FILE (toplevel));
@@ -106,88 +115,105 @@ ide_vcs_monitor_list_status_cb (GObject      *object,
   IdeVcs *vcs = (IdeVcs *)object;
   g_autoptr(IdeVcsMonitor) self = user_data;
   g_autoptr(GListModel) model = NULL;
-  g_autoptr(GHashTable) status_by_file = NULL;
-  GFile *workdir;
-  guint n_items;
 
+  IDE_ENTRY;
+
+  g_assert (IDE_IS_MAIN_THREAD ());
   g_assert (IDE_IS_VCS (vcs));
   g_assert (IDE_IS_VCS_MONITOR (self));
 
+  ide_object_lock (IDE_OBJECT (self));
+
   self->busy = FALSE;
+  self->last_change_seq++;
 
-  model = ide_vcs_list_status_finish (vcs, result, NULL);
-  if (model == NULL)
-    return;
-
-  n_items = g_list_model_get_n_items (model);
-  workdir = ide_vcs_get_working_directory (vcs);
-  status_by_file = g_hash_table_new_full (g_file_hash,
-                                          (GEqualFunc) g_file_equal,
-                                          g_object_unref,
-                                          g_object_unref);
-
-  for (guint i = 0; i < n_items; i++)
+  if ((model = ide_vcs_list_status_finish (vcs, result, NULL)))
     {
-      g_autoptr(IdeVcsFileInfo) info = NULL;
-      IdeVcsFileStatus status;
-      GFile *file;
+      g_autoptr(GHashTable) status_by_file = NULL;
+      guint n_items;
 
-      info = g_list_model_get_item (model, i);
-      file = ide_vcs_file_info_get_file (info);
-      status = ide_vcs_file_info_get_status (info);
+      n_items = g_list_model_get_n_items (model);
+      status_by_file = g_hash_table_new_full (g_file_hash,
+                                              (GEqualFunc)g_file_equal,
+                                              g_object_unref,
+                                              g_object_unref);
 
-      g_hash_table_insert (status_by_file,
-                           g_object_ref (file),
-                           g_steal_pointer (&info));
+      for (guint i = 0; i < n_items; i++)
+        {
+          g_autoptr(IdeVcsFileInfo) info = NULL;
+          IdeVcsFileStatus status;
+          GFile *file;
 
-      ide_vcs_monitor_add_parents (status_by_file, file, workdir, status);
+          info = g_list_model_get_item (model, i);
+          file = ide_vcs_file_info_get_file (info);
+          status = ide_vcs_file_info_get_status (info);
+
+          g_hash_table_insert (status_by_file,
+                               g_file_dup (file),
+                               g_steal_pointer (&info));
+
+          ide_vcs_monitor_add_parents_locked (status_by_file, file, self->root, status);
+        }
+
+      g_clear_pointer (&self->status_by_file, g_hash_table_unref);
+      self->status_by_file = g_steal_pointer (&status_by_file);
+
+      g_signal_emit (self, signals [RELOADED], 0);
     }
 
-  g_clear_pointer (&self->status_by_file, g_hash_table_unref);
-  self->status_by_file = g_steal_pointer (&status_by_file);
+  ide_object_unlock (IDE_OBJECT (self));
 
-  g_signal_emit (self, signals[RELOADED], 0);
+  IDE_EXIT;
 }
 
 static gboolean
 ide_vcs_monitor_cache_cb (gpointer data)
 {
   IdeVcsMonitor *self = data;
-  IdeContext *context;
-  IdeVcs *vcs;
-  GFile *workdir;
 
+  IDE_ENTRY;
+
+  g_assert (IDE_IS_MAIN_THREAD ());
   g_assert (IDE_IS_VCS_MONITOR (self));
+
+  ide_object_lock (IDE_OBJECT (self));
 
   self->cache_source = 0;
 
-  context = ide_object_get_context (IDE_OBJECT (self));
-  vcs = ide_context_get_vcs (context);
-  workdir = ide_vcs_get_working_directory (vcs);
+  if (self->vcs != NULL)
+    {
+      self->busy = TRUE;
+      ide_vcs_list_status_async (self->vcs,
+                                 self->root,
+                                 TRUE,
+                                 G_PRIORITY_LOW,
+                                 NULL,
+                                 ide_vcs_monitor_list_status_cb,
+                                 g_object_ref (self));
+    }
 
-  self->busy = TRUE;
+  ide_object_unlock (IDE_OBJECT (self));
 
-  ide_vcs_list_status_async (vcs,
-                             workdir,
-                             TRUE,
-                             G_PRIORITY_LOW,
-                             NULL,
-                             ide_vcs_monitor_list_status_cb,
-                             g_object_ref (self));
-
-  return G_SOURCE_REMOVE;
+  IDE_RETURN (G_SOURCE_REMOVE);
 }
 
 static void
 ide_vcs_monitor_queue_reload (IdeVcsMonitor *self)
 {
+  IDE_ENTRY;
+
+  g_assert (IDE_IS_MAIN_THREAD ());
   g_assert (IDE_IS_VCS_MONITOR (self));
 
+  ide_object_lock (IDE_OBJECT (self));
   if (self->cache_source == 0 && !self->busy)
     self->cache_source = g_idle_add_full (G_PRIORITY_LOW,
                                           ide_vcs_monitor_cache_cb,
                                           g_object_ref (self),
                                           g_object_unref);
+  ide_object_unlock (IDE_OBJECT (self));
+
+  IDE_EXIT;
 }
 
 static void
@@ -199,10 +225,13 @@ ide_vcs_monitor_changed_cb (IdeVcsMonitor           *self,
 {
   IDE_ENTRY;
 
+  g_assert (IDE_IS_MAIN_THREAD ());
   g_assert (IDE_IS_VCS_MONITOR (self));
   g_assert (G_IS_FILE (file));
   g_assert (!other_file || G_IS_FILE (other_file));
   g_assert (DZL_IS_RECURSIVE_FILE_MONITOR (monitor));
+
+  self->last_change_seq++;
 
   g_signal_emit (self, signals[CHANGED], 0, file, other_file, event);
 
@@ -217,12 +246,15 @@ ide_vcs_monitor_vcs_changed_cb (IdeVcsMonitor *self,
 {
   IDE_ENTRY;
 
+  g_assert (IDE_IS_MAIN_THREAD ());
   g_assert (IDE_IS_VCS_MONITOR (self));
   g_assert (IDE_IS_VCS (vcs));
 
   /* Everything is invalidated by new VCS index, reload now */
+  ide_object_lock (IDE_OBJECT (self));
   g_clear_pointer (&self->status_by_file, g_hash_table_unref);
   ide_vcs_monitor_queue_reload (self);
+  ide_object_unlock (IDE_OBJECT (self));
 
   IDE_EXIT;
 }
@@ -232,15 +264,15 @@ ide_vcs_monitor_ignore_func (GFile    *file,
                              gpointer  data)
 {
   IdeVcsMonitor *self = data;
-  IdeContext *context;
-  IdeVcs *vcs;
+  gboolean ret;
 
   g_assert (IDE_IS_VCS_MONITOR (self));
 
-  context = ide_object_get_context (IDE_OBJECT (self));
-  vcs = ide_context_get_vcs (context);
+  ide_object_lock (IDE_OBJECT (self));
+  ret = ide_vcs_is_ignored (self->vcs, file, NULL);
+  ide_object_unlock (IDE_OBJECT (self));
 
-  return ide_vcs_is_ignored (vcs, file, NULL);
+  return ret;
 }
 
 static void
@@ -252,6 +284,7 @@ ide_vcs_monitor_start_cb (GObject      *object,
   g_autoptr(IdeVcsMonitor) self = user_data;
   g_autoptr(GError) error = NULL;
 
+  g_assert (IDE_IS_MAIN_THREAD ());
   g_assert (DZL_IS_RECURSIVE_FILE_MONITOR (monitor));
   g_assert (G_IS_ASYNC_RESULT (result));
   g_assert (IDE_IS_VCS_MONITOR (self));
@@ -263,47 +296,45 @@ ide_vcs_monitor_start_cb (GObject      *object,
 }
 
 static void
-ide_vcs_monitor_constructed (GObject *object)
+ide_vcs_monitor_maybe_reload_locked (IdeVcsMonitor *self)
 {
-  IdeVcsMonitor *self = (IdeVcsMonitor *)object;
-  IdeContext *context;
-  IdeVcs *vcs;
+  IDE_ENTRY;
 
-  G_OBJECT_CLASS (ide_vcs_monitor_parent_class)->constructed (object);
+  g_assert (IDE_IS_VCS_MONITOR (self));
 
-  context = ide_object_get_context (IDE_OBJECT (self));
-  vcs = ide_context_get_vcs (context);
+  g_clear_pointer (&self->status_by_file, g_hash_table_unref);
+  g_clear_handle_id (&self->cache_source, g_source_remove);
 
-  g_signal_connect_object (vcs,
-                           "changed",
-                           G_CALLBACK (ide_vcs_monitor_vcs_changed_cb),
-                           self,
-                           G_CONNECT_SWAPPED);
+  if (self->monitor)
+    {
+      dzl_signal_group_set_target (self->monitor_signals, NULL);
+      dzl_recursive_file_monitor_set_ignore_func (self->monitor, NULL, NULL, NULL);
+      dzl_recursive_file_monitor_cancel (self->monitor);
+      g_clear_object (&self->monitor);
+    }
 
-  self->monitor = dzl_recursive_file_monitor_new (self->root);
+  if (G_IS_FILE (self->root) && IDE_IS_VCS (self->vcs))
+    {
+      self->monitor = dzl_recursive_file_monitor_new (self->root);
+      dzl_recursive_file_monitor_set_ignore_func (self->monitor,
+                                                  ide_vcs_monitor_ignore_func,
+                                                  self, NULL);
+      dzl_signal_group_set_target (self->monitor_signals, self->monitor);
+      dzl_recursive_file_monitor_start_async (self->monitor,
+                                              NULL,
+                                              ide_vcs_monitor_start_cb,
+                                              g_object_ref (self));
+    }
 
-  dzl_recursive_file_monitor_set_ignore_func (self->monitor,
-                                              ide_vcs_monitor_ignore_func,
-                                              self, NULL);
-
-  g_signal_connect_object (self->monitor,
-                           "changed",
-                           G_CALLBACK (ide_vcs_monitor_changed_cb),
-                           self,
-                           G_CONNECT_SWAPPED);
-
-  dzl_recursive_file_monitor_start_async (self->monitor,
-                                          NULL,
-                                          ide_vcs_monitor_start_cb,
-                                          g_object_ref (self));
+  IDE_EXIT;
 }
 
 static void
-ide_vcs_monitor_dispose (GObject *object)
+ide_vcs_monitor_destroy (IdeObject *object)
 {
   IdeVcsMonitor *self = (IdeVcsMonitor *)object;
 
-  dzl_clear_source (&self->cache_source);
+  g_clear_handle_id (&self->cache_source, g_source_remove);
   g_clear_pointer (&self->status_by_file, g_hash_table_unref);
 
   if (self->monitor != NULL)
@@ -313,7 +344,25 @@ ide_vcs_monitor_dispose (GObject *object)
       g_clear_object (&self->monitor);
     }
 
-  G_OBJECT_CLASS (ide_vcs_monitor_parent_class)->dispose (object);
+  dzl_signal_group_set_target (self->monitor_signals, NULL);
+  dzl_signal_group_set_target (self->vcs_signals, NULL);
+
+  g_clear_object (&self->vcs);
+
+  IDE_OBJECT_CLASS (ide_vcs_monitor_parent_class)->destroy (object);
+}
+
+static void
+ide_vcs_monitor_finalize (GObject *object)
+{
+  IdeVcsMonitor *self = (IdeVcsMonitor *)object;
+
+  g_clear_pointer (&self->status_by_file, g_hash_table_unref);
+  g_clear_object (&self->root);
+  g_clear_object (&self->monitor_signals);
+  g_clear_object (&self->vcs_signals);
+
+  G_OBJECT_CLASS (ide_vcs_monitor_parent_class)->finalize (object);
 }
 
 static void
@@ -327,7 +376,11 @@ ide_vcs_monitor_get_property (GObject    *object,
   switch (prop_id)
     {
     case PROP_ROOT:
-      g_value_set_object (value, self->root);
+      g_value_take_object (value, ide_vcs_monitor_ref_root (self));
+      break;
+
+    case PROP_VCS:
+      g_value_take_object (value, ide_vcs_monitor_ref_vcs (self));
       break;
 
     default:
@@ -346,7 +399,11 @@ ide_vcs_monitor_set_property (GObject      *object,
   switch (prop_id)
     {
     case PROP_ROOT:
-      self->root = g_value_dup_object (value);
+      ide_vcs_monitor_set_root (self, g_value_get_object (value));
+      break;
+
+    case PROP_VCS:
+      ide_vcs_monitor_set_vcs (self, g_value_get_object (value));
       break;
 
     default:
@@ -358,21 +415,59 @@ static void
 ide_vcs_monitor_class_init (IdeVcsMonitorClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
+  IdeObjectClass *i_object_class = IDE_OBJECT_CLASS (klass);
 
-  object_class->constructed = ide_vcs_monitor_constructed;
-  object_class->dispose = ide_vcs_monitor_dispose;
+  object_class->finalize = ide_vcs_monitor_finalize;
   object_class->get_property = ide_vcs_monitor_get_property;
   object_class->set_property = ide_vcs_monitor_set_property;
 
+  i_object_class->destroy = ide_vcs_monitor_destroy;
+
+  /**
+   * IdeVcsMonitor:root:
+   *
+   * The "root" property is the root of the file-system to begin
+   * monitoring for changes.
+   *
+   * Since: 3.32
+   */
   properties [PROP_ROOT] =
     g_param_spec_object ("root",
                          "Root",
                          "The root of the directory tree",
                          G_TYPE_FILE,
-                         (G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
-  
+                         (G_PARAM_READWRITE | G_PARAM_EXPLICIT_NOTIFY | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * IdeVcsMonitor:vcs:
+   *
+   * The "vcs" property is the version control system to be queried for
+   * additional status information when a file has been discovered to
+   * have been changed.
+   *
+   * Since: 3.32
+   */
+  properties [PROP_VCS] =
+    g_param_spec_object ("vcs",
+                         "VCS",
+                         "The version control system in use",
+                         IDE_TYPE_VCS,
+                         (G_PARAM_READWRITE | G_PARAM_EXPLICIT_NOTIFY | G_PARAM_STATIC_STRINGS));
+
   g_object_class_install_properties (object_class, N_PROPS, properties);
 
+  /**
+   * IdeVcsMonitor::changed:
+   * @self: an #IdeVcsMonitor
+   * @file: a #GFile
+   * @other_file: (nullable): a #GFile or %NULL
+   * @event: a #GFileMonitorEvent
+   *
+   * The "changed" signal is emitted when a file has been discovered to
+   * have been changed on disk.
+   *
+   * Since: 3.32
+   */
   signals [CHANGED] =
     g_signal_new ("changed",
                   G_TYPE_FROM_CLASS (klass),
@@ -385,6 +480,14 @@ ide_vcs_monitor_class_init (IdeVcsMonitorClass *klass)
                   G_TYPE_FILE | G_SIGNAL_TYPE_STATIC_SCOPE,
                   G_TYPE_FILE_MONITOR_EVENT);
 
+  /**
+   * IdeVcsMonitor::reloaded:
+   * @self: an #IdeVcsMonitor
+   *
+   * The "reloaded" signal is emitted when the monitor has been reloaded.
+   *
+   * Since: 3.32
+   */
   signals [RELOADED] =
     g_signal_new ("reloaded",
                   G_TYPE_FROM_CLASS (klass),
@@ -395,10 +498,27 @@ ide_vcs_monitor_class_init (IdeVcsMonitorClass *klass)
 static void
 ide_vcs_monitor_init (IdeVcsMonitor *self)
 {
+  self->last_change_seq = 1;
+
+  self->monitor_signals = dzl_signal_group_new (DZL_TYPE_RECURSIVE_FILE_MONITOR);
+
+  dzl_signal_group_connect_object (self->monitor_signals,
+                                   "changed",
+                                   G_CALLBACK (ide_vcs_monitor_changed_cb),
+                                   self,
+                                   G_CONNECT_SWAPPED);
+
+  self->vcs_signals = dzl_signal_group_new (IDE_TYPE_VCS);
+
+  dzl_signal_group_connect_object (self->vcs_signals,
+                                   "changed",
+                                   G_CALLBACK (ide_vcs_monitor_vcs_changed_cb),
+                                   self,
+                                   G_CONNECT_SWAPPED);
 }
 
 /**
- * ide_vcs_monitor_get_info:
+ * ide_vcs_monitor_ref_info:
  * @self: a #IdeVcsMonitor
  * @file: a #GFile
  *
@@ -407,25 +527,139 @@ ide_vcs_monitor_init (IdeVcsMonitor *self)
  * If the file information has not been loaded, %NULL is returned. You
  * can wait for #IdeVcsMonitor::reloaded and query again if you expect
  * the info to be there.
- * 
- * Returns: (transfer none) (nullable): an #IdeVcsFileInfo or %NULL
  *
- * Since: 3.28
+ * Returns: (transfer full) (nullable): an #IdeVcsFileInfo or %NULL
+ *
+ * Since: 3.32
  */
 IdeVcsFileInfo *
-ide_vcs_monitor_get_info (IdeVcsMonitor *self,
+ide_vcs_monitor_ref_info (IdeVcsMonitor *self,
                           GFile         *file)
 {
-  IdeVcsFileInfo *info;
+  IdeVcsFileInfo *info = NULL;
 
   g_return_val_if_fail (IDE_IS_VCS_MONITOR (self), NULL);
 
-  if (self->status_by_file == NULL)
-    return NULL;
+  ide_object_lock (IDE_OBJECT (self));
+  if (self->status_by_file != NULL)
+    {
+      if ((info = g_hash_table_lookup (self->status_by_file, file)))
+        g_object_ref (info);
+    }
+  ide_object_unlock (IDE_OBJECT (self));
 
-  info = g_hash_table_lookup (self->status_by_file, file);
-  if (info == NULL)
-    return NULL;
+  return g_steal_pointer (&info);
+}
 
-  return g_object_ref (info);
+/**
+ * ide_vcs_monitor_ref_vcs:
+ * @self: a #IdeVcsMonitor
+ *
+ * Increments the reference count of the #IdeVcs monitored using the
+ * #IdeVcsMonitor and returns it.
+ *
+ * Returns: (transfer full) (nullable): an #IdeVcs or %NULL
+ *
+ * Since: 3.32
+ */
+IdeVcs *
+ide_vcs_monitor_ref_vcs (IdeVcsMonitor *self)
+{
+  IdeVcs *ret;
+
+  g_return_val_if_fail (IDE_IS_VCS_MONITOR (self), NULL);
+
+  ide_object_lock (IDE_OBJECT (self));
+  ret = self->vcs ? g_object_ref (self->vcs) : NULL;
+  ide_object_unlock (IDE_OBJECT (self));
+
+  return g_steal_pointer (&ret);
+}
+
+/**
+ * ide_vcs_monitor_ref_root:
+ * @self: a #IdeVcsMonitor
+ *
+ * Gets the #IdeVcsMonitor:root property and increments the reference
+ * count of the #GFile by one.
+ *
+ * Returns: (transfer full) (nullable): a #GFile or %NULL
+ *
+ * Since: 3.32
+ */
+GFile *
+ide_vcs_monitor_ref_root (IdeVcsMonitor *self)
+{
+  GFile *ret;
+
+  g_return_val_if_fail (IDE_IS_VCS_MONITOR (self), NULL);
+
+  ide_object_lock (IDE_OBJECT (self));
+  ret = self->root ? g_object_ref (self->root) : NULL;
+  ide_vcs_monitor_maybe_reload_locked (self);
+  ide_object_unlock (IDE_OBJECT (self));
+
+  return g_steal_pointer (&ret);
+}
+
+void
+ide_vcs_monitor_set_root (IdeVcsMonitor *self,
+                          GFile         *root)
+{
+  g_return_if_fail (IDE_IS_MAIN_THREAD ());
+  g_return_if_fail (IDE_IS_VCS_MONITOR (self));
+  g_return_if_fail (G_IS_FILE (root));
+
+  ide_object_lock (IDE_OBJECT (self));
+  if (g_set_object (&self->root, root))
+    {
+      ide_object_notify_by_pspec (self, properties [PROP_ROOT]);
+      ide_vcs_monitor_maybe_reload_locked (self);
+    }
+  ide_object_unlock (IDE_OBJECT (self));
+}
+
+void
+ide_vcs_monitor_set_vcs (IdeVcsMonitor *self,
+                         IdeVcs        *vcs)
+{
+  g_return_if_fail (IDE_IS_MAIN_THREAD ());
+  g_return_if_fail (IDE_IS_VCS_MONITOR (self));
+  g_return_if_fail (!vcs || IDE_IS_VCS (vcs));
+
+  ide_object_lock (IDE_OBJECT (self));
+  if (g_set_object (&self->vcs, vcs))
+    {
+      dzl_signal_group_set_target (self->vcs_signals, vcs);
+      ide_object_notify_by_pspec (self, properties [PROP_VCS]);
+      ide_vcs_monitor_maybe_reload_locked (self);
+    }
+  ide_object_unlock (IDE_OBJECT (self));
+}
+
+guint64
+ide_vcs_monitor_get_sequence (IdeVcsMonitor *self)
+{
+  g_return_val_if_fail (IDE_IS_VCS_MONITOR (self), 0);
+
+  return self->last_change_seq;
+}
+
+/**
+ * ide_vcs_monitor_from_context:
+ * @context: an #IdeContext
+ *
+ * Gets the #IdeVcsMonitor for a context.
+ *
+ * Returns: (nullable) (transfer none): an #IdeVcsMonitor
+ *
+ * Since: 3.32
+ */
+IdeVcsMonitor *
+ide_vcs_monitor_from_context (IdeContext *context)
+{
+  g_return_val_if_fail (IDE_IS_MAIN_THREAD (), NULL);
+  g_return_val_if_fail (IDE_IS_CONTEXT (context), NULL);
+
+  return ide_context_peek_child_typed (context, IDE_TYPE_VCS_MONITOR);
 }

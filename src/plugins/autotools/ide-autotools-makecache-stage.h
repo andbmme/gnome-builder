@@ -1,6 +1,6 @@
 /* ide-autotools-makecache-stage.h
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,11 +14,13 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #pragma once
 
-#include <ide.h>
+#include <libide-foundry.h>
 
 #include "ide-makecache.h"
 
@@ -26,9 +28,9 @@ G_BEGIN_DECLS
 
 #define IDE_TYPE_AUTOTOOLS_MAKECACHE_STAGE (ide_autotools_makecache_stage_get_type())
 
-G_DECLARE_FINAL_TYPE (IdeAutotoolsMakecacheStage, ide_autotools_makecache_stage, IDE, AUTOTOOLS_MAKECACHE_STAGE, IdeBuildStageLauncher)
+G_DECLARE_FINAL_TYPE (IdeAutotoolsMakecacheStage, ide_autotools_makecache_stage, IDE, AUTOTOOLS_MAKECACHE_STAGE, IdePipelineStageLauncher)
 
-IdeBuildStage *ide_autotools_makecache_stage_new_for_pipeline (IdeBuildPipeline            *pipeline,
+IdePipelineStage *ide_autotools_makecache_stage_new_for_pipeline (IdePipeline            *pipeline,
                                                                GError                     **error);
 IdeMakecache  *ide_autotools_makecache_stage_get_makecache    (IdeAutotoolsMakecacheStage  *self);
 

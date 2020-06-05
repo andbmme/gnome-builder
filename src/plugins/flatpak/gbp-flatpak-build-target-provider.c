@@ -1,6 +1,6 @@
 /* gbp-flatpak-build-target-provider.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gbp-flatpak-build-target-provider"
@@ -34,22 +36,22 @@ gbp_flatpak_build_target_provider_get_targets_async (IdeBuildTargetProvider *pro
                                                      gpointer                user_data)
 {
   GbpFlatpakBuildTargetProvider *self = (GbpFlatpakBuildTargetProvider *)provider;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   g_autoptr(GPtrArray) targets = NULL;
-  IdeConfigurationManager *config_manager;
-  IdeConfiguration *config;
+  IdeConfigManager *config_manager;
+  IdeConfig *config;
   IdeContext *context;
 
   g_assert (GBP_IS_FLATPAK_BUILD_TARGET_PROVIDER (self));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, gbp_flatpak_build_target_provider_get_targets_async);
-  g_task_set_priority (task, G_PRIORITY_LOW);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, gbp_flatpak_build_target_provider_get_targets_async);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
 
   context = ide_object_get_context (IDE_OBJECT (self));
-  config_manager = ide_context_get_configuration_manager (context);
-  config = ide_configuration_manager_get_current (config_manager);
+  config_manager = ide_config_manager_from_context (context);
+  config = ide_config_manager_get_current (config_manager);
 
   targets = g_ptr_array_new_with_free_func (g_object_unref);
 
@@ -61,16 +63,15 @@ gbp_flatpak_build_target_provider_get_targets_async (IdeBuildTargetProvider *pro
       command = gbp_flatpak_manifest_get_command (GBP_FLATPAK_MANIFEST (config));
 
       target = g_object_new (GBP_TYPE_FLATPAK_BUILD_TARGET,
-                             "context", context,
                              "command", command,
                              NULL);
 
       g_ptr_array_add (targets, g_steal_pointer (&target));
     }
 
-  g_task_return_pointer (task,
-                         g_steal_pointer (&targets),
-                         (GDestroyNotify)g_ptr_array_unref);
+  ide_task_return_pointer (task,
+                           g_steal_pointer (&targets),
+                           g_ptr_array_unref);
 }
 
 static GPtrArray *
@@ -78,11 +79,15 @@ gbp_flatpak_build_target_provider_get_targets_finish (IdeBuildTargetProvider  *p
                                                       GAsyncResult            *result,
                                                       GError                 **error)
 {
-  g_assert (GBP_IS_FLATPAK_BUILD_TARGET_PROVIDER (provider));
-  g_assert (G_IS_TASK (result));
-  g_assert (g_task_is_valid (G_TASK (result), provider));
+  GPtrArray *ret;
 
-  return g_task_propagate_pointer (G_TASK (result), error);
+  g_assert (GBP_IS_FLATPAK_BUILD_TARGET_PROVIDER (provider));
+  g_assert (IDE_IS_TASK (result));
+  g_assert (ide_task_is_valid (IDE_TASK (result), provider));
+
+  ret = ide_task_propagate_pointer (IDE_TASK (result), error);
+
+  return IDE_PTR_ARRAY_STEAL_FULL (&ret);
 }
 
 static void

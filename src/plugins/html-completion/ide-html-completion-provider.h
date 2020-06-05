@@ -1,6 +1,6 @@
 /* ide-html-completion-provider.h
  *
- * Copyright © 2014 Christian Hergert <christian@hergert.me>
+ * Copyright 2014-2019 Christian Hergert <christian@hergert.me>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,17 +14,18 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #pragma once
 
-#include <gtksourceview/gtksource.h>
-#include <ide.h>
+#include <glib-object.h>
 
 G_BEGIN_DECLS
 
 #define IDE_TYPE_HTML_COMPLETION_PROVIDER (ide_html_completion_provider_get_type())
 
-G_DECLARE_FINAL_TYPE (IdeHtmlCompletionProvider, ide_html_completion_provider, IDE, HTML_COMPLETION_PROVIDER, IdeObject)
+G_DECLARE_FINAL_TYPE (IdeHtmlCompletionProvider, ide_html_completion_provider, IDE, HTML_COMPLETION_PROVIDER, GObject)
 
 G_END_DECLS

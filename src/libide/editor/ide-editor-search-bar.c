@@ -1,6 +1,6 @@
 /* ide-editor-search-bar.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,17 +14,21 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "ide-editor-search-bar"
 
+#include "config.h"
+
 #include <dazzle.h>
 #include <glib/gi18n.h>
 
-#include "editor/ide-editor-private.h"
-#include "editor/ide-editor-search.h"
-#include "editor/ide-editor-search-bar.h"
-#include "search/ide-tagged-entry.h"
+#include "ide-editor-private.h"
+#include "ide-editor-search.h"
+#include "ide-editor-search-bar.h"
+#include "ide-source-view-private.h"
 
 struct _IdeEditorSearchBar
 {
@@ -45,6 +49,7 @@ struct _IdeEditorSearchBar
   GtkCheckButton          *use_regex;
   GtkCheckButton          *whole_word;
   GtkLabel                *search_text_error;
+  GtkButton               *close_button;
 
   guint                    match_source;
 
@@ -91,6 +96,7 @@ ide_editor_search_bar_set_replace_mode (IdeEditorSearchBar *self,
       gtk_widget_set_visible (GTK_WIDGET (self->replace_entry), replace_mode);
       gtk_widget_set_visible (GTK_WIDGET (self->replace_button), replace_mode);
       gtk_widget_set_visible (GTK_WIDGET (self->replace_all_button), replace_mode);
+      g_object_notify_by_pspec (G_OBJECT (self), properties [PROP_REPLACE_MODE]);
     }
 }
 
@@ -166,10 +172,37 @@ search_entry_populate_popup (IdeEditorSearchBar *self,
 
   if (GTK_IS_MENU (widget))
     {
-      DzlApplication *app = DZL_APPLICATION (g_application_get_default ());
-      GMenu *menu = dzl_application_get_menu_by_id (app, "ide-editor-search-bar-entry-menu");
+      g_autoptr(DzlPropertiesGroup) group = NULL;
+      GtkWidget *item;
+      GtkWidget *sep;
+      guint pos = 0;
 
-      gtk_menu_shell_bind_model (GTK_MENU_SHELL (widget), G_MENU_MODEL (menu), NULL, TRUE);
+      item = gtk_check_menu_item_new_with_label (_("Regular expressions"));
+      gtk_actionable_set_action_name (GTK_ACTIONABLE (item), "search-settings.regex-enabled");
+      gtk_menu_shell_insert (GTK_MENU_SHELL (widget), item, pos++);
+      gtk_widget_show (item);
+
+      item = gtk_check_menu_item_new_with_label (_("Case sensitive"));
+      gtk_actionable_set_action_name (GTK_ACTIONABLE (item), "search-settings.case-sensitive");
+      gtk_menu_shell_insert (GTK_MENU_SHELL (widget), item, pos++);
+      gtk_widget_show (item);
+
+      item = gtk_check_menu_item_new_with_label (_("Match whole word only"));
+      gtk_actionable_set_action_name (GTK_ACTIONABLE (item), "search-settings.at-word-boundaries");
+      gtk_menu_shell_insert (GTK_MENU_SHELL (widget), item, pos++);
+      gtk_widget_show (item);
+
+      sep = gtk_separator_menu_item_new ();
+      gtk_menu_shell_insert (GTK_MENU_SHELL (widget), sep, pos++);
+      gtk_widget_show (sep);
+
+      if (self->search != NULL)
+        {
+          group = dzl_properties_group_new (G_OBJECT (self->search));
+          dzl_properties_group_add_all_properties (group);
+        }
+
+      gtk_widget_insert_action_group (widget, "search-settings", G_ACTION_GROUP (group));
     }
 }
 
@@ -228,9 +261,25 @@ search_entry_activate (IdeEditorSearchBar *self,
 
   if (self->search != NULL)
     {
-      ide_editor_search_set_extend_selection (self->search, IDE_EDITOR_SEARCH_SELECT_NONE);
-      ide_editor_search_set_repeat (self->search, 0);
-      ide_editor_search_move (self->search, IDE_EDITOR_SEARCH_NEXT);
+      GtkWidget *page;
+
+      /* If the user is already on a match occurrence, then we don't
+       * want to advance them to the next position (instead, we'll drop
+       * them back in the editor at the current position.
+       */
+      if (ide_editor_search_get_match_position (self->search) == 0)
+        {
+          ide_editor_search_set_extend_selection (self->search, IDE_EDITOR_SEARCH_SELECT_NONE);
+          ide_editor_search_set_repeat (self->search, 0);
+          ide_editor_search_move (self->search, IDE_EDITOR_SEARCH_NEXT);
+        }
+
+      if ((page = gtk_widget_get_ancestor (GTK_WIDGET (self), IDE_TYPE_EDITOR_PAGE)))
+        {
+          IdeSourceView *view = ide_editor_page_get_view (IDE_EDITOR_PAGE (page));
+
+          _ide_source_view_clear_saved_mark (view);
+        }
     }
 
   g_signal_emit (self, signals [STOP_SEARCH], 0);
@@ -287,6 +336,7 @@ static gboolean
 update_match_positions (gpointer user_data)
 {
   IdeEditorSearchBar *self = user_data;
+  GtkStyleContext *style;
   g_autofree gchar *str = NULL;
   guint count;
   guint pos;
@@ -321,6 +371,13 @@ update_match_positions (gpointer user_data)
       ide_tagged_entry_tag_set_label (self->search_entry_tag, str);
     }
 
+  style = gtk_widget_get_style_context (GTK_WIDGET(self->search_entry));
+
+  if (count == 0 && gtk_entry_get_text_length (GTK_ENTRY (self->search_entry)) > 0)
+    gtk_style_context_add_class (style, GTK_STYLE_CLASS_ERROR);
+  else
+    gtk_style_context_remove_class(style, GTK_STYLE_CLASS_ERROR);
+
   return G_SOURCE_REMOVE;
 }
 
@@ -341,6 +398,20 @@ ide_editor_search_bar_notify_match (IdeEditorSearchBar *self,
                                                     update_match_positions,
                                                     g_object_ref (self),
                                                     g_object_unref);
+}
+
+static void
+on_close_button_clicked (IdeEditorSearchBar *self,
+                         GtkButton          *button)
+{
+  IDE_ENTRY;
+
+  g_assert (IDE_IS_EDITOR_SEARCH_BAR (self));
+  g_assert (GTK_IS_BUTTON (button));
+
+  g_signal_emit (self, signals [STOP_SEARCH], 0);
+
+  IDE_EXIT;
 }
 
 static void
@@ -435,8 +506,9 @@ ide_editor_search_bar_class_init (IdeEditorSearchBarClass *klass)
                                 g_cclosure_marshal_VOID__VOID,
                                 G_TYPE_NONE, 0);
 
-  gtk_widget_class_set_template_from_resource (widget_class, "/org/gnome/builder/ui/ide-editor-search-bar.ui");
+  gtk_widget_class_set_template_from_resource (widget_class, "/org/gnome/libide-editor/ui/ide-editor-search-bar.ui");
   gtk_widget_class_bind_template_child (widget_class, IdeEditorSearchBar, case_sensitive);
+  gtk_widget_class_bind_template_child (widget_class, IdeEditorSearchBar, close_button);
   gtk_widget_class_bind_template_child (widget_class, IdeEditorSearchBar, replace_all_button);
   gtk_widget_class_bind_template_child (widget_class, IdeEditorSearchBar, replace_button);
   gtk_widget_class_bind_template_child (widget_class, IdeEditorSearchBar, replace_entry);
@@ -510,6 +582,10 @@ ide_editor_search_bar_init (IdeEditorSearchBar *self)
                             "stop-search",
                             G_CALLBACK (search_entry_stop_search),
                             self);
+  g_signal_connect_swapped (self->replace_entry,
+                            "stop-search",
+                            G_CALLBACK (search_entry_stop_search),
+                            self);
 
   g_signal_connect_swapped (self->search_entry,
                             "previous-match",
@@ -519,6 +595,11 @@ ide_editor_search_bar_init (IdeEditorSearchBar *self)
   g_signal_connect_swapped (self->search_entry,
                             "next-match",
                             G_CALLBACK (search_entry_next_match),
+                            self);
+
+  g_signal_connect_swapped (self->close_button,
+                            "clicked",
+                            G_CALLBACK (on_close_button_clicked),
                             self);
 
   _ide_editor_search_bar_init_shortcuts (self);
@@ -555,6 +636,8 @@ ide_editor_search_bar_set_show_options (IdeEditorSearchBar *self,
  * Gets the #IdeEditorSearch used by the search bar.
  *
  * Returns: (transfer none) (nullable): An #IdeEditorSearch or %NULL.
+ *
+ * Since: 3.32
  */
 IdeEditorSearch *
 ide_editor_search_bar_get_search (IdeEditorSearchBar *self)

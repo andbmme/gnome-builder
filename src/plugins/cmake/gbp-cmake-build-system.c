@@ -1,7 +1,7 @@
 /* gbp-cmake-build-system.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
- * Copyright © 2017 Martin Blanchard <tchaik@gmx.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017 Martin Blanchard <tchaik@gmx.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -15,6 +15,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gbp-cmake-build-system"
@@ -99,17 +101,17 @@ gbp_cmake_build_system_ensure_config_cb (GObject      *object,
                                          gpointer      user_data)
 {
   IdeBuildManager *build_manager = (IdeBuildManager *)object;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
 
   g_assert (IDE_IS_BUILD_MANAGER (build_manager));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
-  if (!ide_build_manager_execute_finish (build_manager, result, &error))
-    g_task_return_error (task, g_steal_pointer (&error));
+  if (!ide_build_manager_build_finish (build_manager, result, &error))
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
-    g_task_return_boolean (task, TRUE);
+    ide_task_return_boolean (task, TRUE);
 }
 
 static void
@@ -118,22 +120,23 @@ gbp_cmake_build_system_ensure_config_async (GbpCMakeBuildSystem *self,
                                             GAsyncReadyCallback  callback,
                                             gpointer             user_data)
 {
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   IdeBuildManager *build_manager;
   IdeContext *context;
 
   g_assert (GBP_IS_CMAKE_BUILD_SYSTEM (self));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, gbp_cmake_build_system_ensure_config_async);
-  g_task_set_priority (task, G_PRIORITY_LOW);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, gbp_cmake_build_system_ensure_config_async);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
 
   context = ide_object_get_context (IDE_OBJECT (self));
-  build_manager = ide_context_get_build_manager (context);
+  build_manager = ide_build_manager_from_context (context);
 
-  ide_build_manager_execute_async (build_manager,
-                                   IDE_BUILD_PHASE_CONFIGURE,
+  ide_build_manager_build_async (build_manager,
+                                   IDE_PIPELINE_PHASE_CONFIGURE,
+                                   NULL,
                                    cancellable,
                                    gbp_cmake_build_system_ensure_config_cb,
                                    g_steal_pointer (&task));
@@ -145,9 +148,9 @@ gbp_cmake_build_system_ensure_config_finish (GbpCMakeBuildSystem  *self,
                                              GError              **error)
 {
   g_assert (GBP_IS_CMAKE_BUILD_SYSTEM (self));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_TASK (result));
 
-  return g_task_propagate_boolean (G_TASK (result), error);
+  return ide_task_propagate_boolean (IDE_TASK (result), error);
 }
 
 static void
@@ -157,25 +160,25 @@ gbp_cmake_build_system_load_commands_load_cb (GObject      *object,
 {
   IdeCompileCommands *compile_commands = (IdeCompileCommands *)object;
   GbpCMakeBuildSystem *self;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
 
   g_assert (IDE_IS_COMPILE_COMMANDS (compile_commands));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
-  self = g_task_get_source_object (task);
+  self = ide_task_get_source_object (task);
   g_assert (GBP_IS_CMAKE_BUILD_SYSTEM (self));
 
   if (!ide_compile_commands_load_finish (compile_commands, result, &error))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
   g_set_object (&self->compile_commands, compile_commands);
 
-  g_task_return_pointer (task, g_object_ref (compile_commands), g_object_unref);
+  ide_task_return_pointer (task, g_object_ref (compile_commands), g_object_unref);
 }
 
 static void
@@ -185,55 +188,54 @@ gbp_cmake_build_system_load_commands_config_cb (GObject      *object,
 {
   GbpCMakeBuildSystem *self = (GbpCMakeBuildSystem *)object;
   g_autoptr(IdeCompileCommands) compile_commands = NULL;
-  g_autoptr(GTask) task = user_data;
-  g_autoptr(GFileMonitor) monitor = NULL;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
   g_autoptr(GFile) file = NULL;
   g_autofree gchar *path = NULL;
   IdeBuildManager *build_manager;
-  IdeBuildPipeline *pipeline;
+  IdePipeline *pipeline;
   GCancellable *cancellable;
   IdeContext *context;
 
   g_assert (GBP_IS_CMAKE_BUILD_SYSTEM (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   if (!gbp_cmake_build_system_ensure_config_finish (self, result, &error))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
   context = ide_object_get_context (IDE_OBJECT (self));
-  build_manager = ide_context_get_build_manager (context);
+  build_manager = ide_build_manager_from_context (context);
   pipeline = ide_build_manager_get_pipeline (build_manager);
 
   if (pipeline == NULL)
     {
       /* Unlikely, but possible */
-      g_task_return_new_error (task,
-                               G_IO_ERROR,
-                               G_IO_ERROR_FAILED,
-                               "No build pipeline is available");
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_FAILED,
+                                 "No build pipeline is available");
       return;
     }
 
-  path = ide_build_pipeline_build_builddir_path (pipeline, "compile_commands.json", NULL);
+  path = ide_pipeline_build_builddir_path (pipeline, "compile_commands.json", NULL);
 
   if (!g_file_test (path, G_FILE_TEST_IS_REGULAR))
     {
       /* Unlikely, but possible */
-      g_task_return_new_error (task,
-                               G_IO_ERROR,
-                               G_IO_ERROR_NOT_FOUND,
-                               "Failed to locate compile_commands.json");
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_NOT_FOUND,
+                                 "Failed to locate compile_commands.json");
       return;
     }
 
   compile_commands = ide_compile_commands_new ();
   file = g_file_new_for_path (path);
-  cancellable = g_task_get_cancellable (task);
+  cancellable = ide_task_get_cancellable (task);
 
   ide_compile_commands_load_async (compile_commands,
                                    file,
@@ -250,17 +252,17 @@ gbp_cmake_build_system_load_commands_async (GbpCMakeBuildSystem *self,
                                             GAsyncReadyCallback  callback,
                                             gpointer             user_data)
 {
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   IdeBuildManager *build_manager;
-  IdeBuildPipeline *pipeline;
+  IdePipeline *pipeline;
   IdeContext *context;
 
   g_assert (GBP_IS_CMAKE_BUILD_SYSTEM (self));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, gbp_cmake_build_system_load_commands_async);
-  g_task_set_priority (task, G_PRIORITY_LOW);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, gbp_cmake_build_system_load_commands_async);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
 
   /*
    * If we've already load the compile commands database, use it and
@@ -270,9 +272,9 @@ gbp_cmake_build_system_load_commands_async (GbpCMakeBuildSystem *self,
 
   if (self->compile_commands != NULL)
     {
-      g_task_return_pointer (task,
-                             g_object_ref (self->compile_commands),
-                             g_object_unref);
+      ide_task_return_pointer (task,
+                               g_object_ref (self->compile_commands),
+                               g_object_unref);
       return;
     }
 
@@ -283,14 +285,14 @@ gbp_cmake_build_system_load_commands_async (GbpCMakeBuildSystem *self,
    */
 
   context = ide_object_get_context (IDE_OBJECT (self));
-  build_manager = ide_context_get_build_manager (context);
+  build_manager = ide_build_manager_from_context (context);
   pipeline = ide_build_manager_get_pipeline (build_manager);
 
   if (pipeline != NULL)
     {
       g_autofree gchar *path = NULL;
 
-      path = ide_build_pipeline_build_builddir_path (pipeline, "compile_commands.json", NULL);
+      path = ide_pipeline_build_builddir_path (pipeline, "compile_commands.json", NULL);
 
       if (g_file_test (path, G_FILE_TEST_IS_REGULAR))
         {
@@ -330,9 +332,9 @@ gbp_cmake_build_system_load_commands_finish (GbpCMakeBuildSystem  *self,
                                              GError              **error)
 {
   g_assert (GBP_IS_CMAKE_BUILD_SYSTEM (self));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_TASK (result));
 
-  return g_task_propagate_pointer (G_TASK (result), error);
+  return ide_task_propagate_pointer (IDE_TASK (result), error);
 }
 
 static void
@@ -434,37 +436,37 @@ gbp_cmake_build_system_get_build_flags_cb (GObject      *object,
 {
   GbpCMakeBuildSystem *self = (GbpCMakeBuildSystem *)object;
   g_autoptr(IdeCompileCommands) compile_commands = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
   g_autoptr(GFile) directory = NULL;
   g_auto(GStrv) system_includes = NULL;
   g_auto(GStrv) build_flags = NULL;
-  IdeConfigurationManager *config_manager;
+  IdeConfigManager *config_manager;
   IdeContext *context;
-  IdeConfiguration *config;
+  IdeConfig *config;
   IdeRuntime *runtime;
   GFile *file;
 
   g_assert (GBP_IS_CMAKE_BUILD_SYSTEM (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   compile_commands = gbp_cmake_build_system_load_commands_finish (self, result, &error);
 
   if (compile_commands == NULL)
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
-  file = g_task_get_task_data (task);
+  file = ide_task_get_task_data (task);
   g_assert (G_IS_FILE (file));
 
   /* Get non-standard system includes */
   context = ide_object_get_context (IDE_OBJECT (self));
-  config_manager = ide_context_get_configuration_manager (context);
-  config = ide_configuration_manager_get_current (config_manager);
-  if (NULL != (runtime = ide_configuration_get_runtime (config)))
+  config_manager = ide_config_manager_from_context (context);
+  config = ide_config_manager_get_current (config_manager);
+  if ((runtime = ide_config_get_runtime (config)))
     system_includes = ide_runtime_get_system_include_dirs (runtime);
 
   build_flags = ide_compile_commands_lookup (compile_commands,
@@ -474,34 +476,31 @@ gbp_cmake_build_system_get_build_flags_cb (GObject      *object,
                                              &error);
 
   if (build_flags == NULL)
-    g_task_return_error (task, g_steal_pointer (&error));
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
-    g_task_return_pointer (task, g_steal_pointer (&build_flags), (GDestroyNotify)g_strfreev);
+    ide_task_return_pointer (task, g_steal_pointer (&build_flags), g_strfreev);
 }
 
 static void
 gbp_cmake_build_system_get_build_flags_async (IdeBuildSystem      *build_system,
-                                              IdeFile             *file,
+                                              GFile               *file,
                                               GCancellable        *cancellable,
                                               GAsyncReadyCallback  callback,
                                               gpointer             user_data)
 {
   GbpCMakeBuildSystem *self = (GbpCMakeBuildSystem *)build_system;
-  g_autoptr(GTask) task = NULL;
-  GFile *gfile;
+  g_autoptr(IdeTask) task = NULL;
 
   IDE_ENTRY;
 
   g_assert (GBP_IS_CMAKE_BUILD_SYSTEM (self));
-  g_assert (IDE_IS_FILE (file));
+  g_assert (G_IS_FILE (file));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  gfile = ide_file_get_file (file);
-
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_priority (task, G_PRIORITY_LOW);
-  g_task_set_source_tag (task, gbp_cmake_build_system_get_build_flags_async);
-  g_task_set_task_data (task, g_object_ref (gfile), g_object_unref);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
+  ide_task_set_source_tag (task, gbp_cmake_build_system_get_build_flags_async);
+  ide_task_set_task_data (task, g_object_ref (file), g_object_unref);
 
   gbp_cmake_build_system_load_commands_async (self,
                                               cancellable,
@@ -516,15 +515,14 @@ gbp_cmake_build_system_get_build_flags_finish (IdeBuildSystem  *build_system,
                                                GAsyncResult    *result,
                                                GError         **error)
 {
-  GbpCMakeBuildSystem *self = (GbpCMakeBuildSystem *)build_system;
   gchar **build_flags;
 
   IDE_ENTRY;
 
-  g_assert (GBP_IS_CMAKE_BUILD_SYSTEM (self));
-  g_assert (G_IS_TASK (result));
+  g_assert (GBP_IS_CMAKE_BUILD_SYSTEM (build_system));
+  g_assert (IDE_IS_TASK (result));
 
-  build_flags = g_task_propagate_pointer (G_TASK (result), error);
+  build_flags = ide_task_propagate_pointer (IDE_TASK (result), error);
 
   IDE_RETURN (build_flags);
 }
@@ -560,7 +558,7 @@ gbp_cmake_build_system_notify_pipeline (GbpCMakeBuildSystem *self,
 }
 
 static void
-gbp_cmake_build_system_init_worker (GTask        *task,
+gbp_cmake_build_system_init_worker (IdeTask      *task,
                                     gpointer      source_object,
                                     gpointer      task_data,
                                     GCancellable *cancellable)
@@ -576,9 +574,9 @@ gbp_cmake_build_system_init_worker (GTask        *task,
 
   name = g_file_get_basename (project_file);
 
-  if (dzl_str_equal0 (name, "CMakeLists.txt"))
+  if (ide_str_equal0 (name, "CMakeLists.txt"))
     {
-      g_task_return_pointer (task, g_object_ref (project_file), g_object_unref);
+      ide_task_return_pointer (task, g_object_ref (project_file), g_object_unref);
       IDE_EXIT;
     }
 
@@ -588,16 +586,16 @@ gbp_cmake_build_system_init_worker (GTask        *task,
 
       if (g_file_query_exists (cmake_file, cancellable))
         {
-          g_task_return_pointer (task, g_object_ref (cmake_file), g_object_unref);
+          ide_task_return_pointer (task, g_object_ref (cmake_file), g_object_unref);
           IDE_EXIT;
         }
     }
 
-  g_task_return_new_error (task,
-                           G_IO_ERROR,
-                           G_IO_ERROR_NOT_SUPPORTED,
-                           "%s is not supported by the cmake plugin",
-                           name);
+  ide_task_return_new_error (task,
+                             G_IO_ERROR,
+                             G_IO_ERROR_NOT_SUPPORTED,
+                             "%s is not supported by the cmake plugin",
+                             name);
 
   IDE_EXIT;
 }
@@ -610,7 +608,7 @@ gbp_cmake_build_system_init_async (GAsyncInitable      *initable,
                                    gpointer             user_data)
 {
   GbpCMakeBuildSystem *self = (GbpCMakeBuildSystem *)initable;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   IdeBuildManager *build_manager;
   IdeContext *context;
 
@@ -623,13 +621,13 @@ gbp_cmake_build_system_init_async (GAsyncInitable      *initable,
   context = ide_object_get_context (IDE_OBJECT (self));
   g_assert (IDE_IS_CONTEXT (context));
 
-  build_manager = ide_context_get_build_manager (context);
+  build_manager = ide_build_manager_from_context (context);
   g_assert (IDE_IS_BUILD_MANAGER (build_manager));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, gbp_cmake_build_system_init_async);
-  g_task_set_priority (task, io_priority);
-  g_task_set_task_data (task, g_object_ref (self->project_file), g_object_unref);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, gbp_cmake_build_system_init_async);
+  ide_task_set_priority (task, io_priority);
+  ide_task_set_task_data (task, g_object_ref (self->project_file), g_object_unref);
 
   /*
    * We want to be notified of any changes to the current build manager.
@@ -641,7 +639,7 @@ gbp_cmake_build_system_init_async (GAsyncInitable      *initable,
                            self,
                            G_CONNECT_SWAPPED);
 
-  g_task_run_in_thread (task, gbp_cmake_build_system_init_worker);
+  ide_task_run_in_thread (task, gbp_cmake_build_system_init_worker);
 
   IDE_EXIT;
 }
@@ -657,9 +655,9 @@ gbp_cmake_build_system_init_finish (GAsyncInitable  *initable,
   IDE_ENTRY;
 
   g_assert (GBP_IS_CMAKE_BUILD_SYSTEM (self));
-  g_assert (G_IS_TASK (result));
+  g_assert (IDE_IS_TASK (result));
 
-  project_file = g_task_propagate_pointer (G_TASK (result), error);
+  project_file = ide_task_propagate_pointer (IDE_TASK (result), error);
   if (g_set_object (&self->project_file, project_file))
     g_object_notify_by_pspec (G_OBJECT (self), properties [PROP_PROJECT_FILE]);
 

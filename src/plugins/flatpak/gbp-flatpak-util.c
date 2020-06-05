@@ -1,6 +1,6 @@
 /* gbp-flatpak-util.c
  *
- * Copyright © 2016 Christian Hergert <chergert@redhat.com>
+ * Copyright 2016-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,12 +14,16 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gbp-flatpak-util"
 
 #include <flatpak.h>
 #include <string.h>
+#include <libide-foundry.h>
+#include <libide-vcs.h>
 
 #include "gbp-flatpak-util.h"
 
@@ -30,20 +34,22 @@ gbp_flatpak_get_repo_dir (IdeContext *context)
 }
 
 gchar *
-gbp_flatpak_get_staging_dir (IdeBuildPipeline *pipeline)
+gbp_flatpak_get_staging_dir (IdePipeline *pipeline)
 {
   g_autofree gchar *branch = NULL;
   g_autofree gchar *name = NULL;
-  const gchar *arch;
-  IdeContext *context;
-  IdeVcs *vcs;
+  g_autofree gchar *arch = NULL;
+  g_autoptr (IdeTriplet) triplet = NULL;
+  g_autoptr(IdeContext) context = NULL;
+  g_autoptr(IdeVcs) vcs = NULL;
+  g_autoptr(IdeToolchain) toolchain = NULL;
 
-  g_assert (IDE_IS_BUILD_PIPELINE (pipeline));
+  g_assert (IDE_IS_PIPELINE (pipeline));
 
-  context = ide_object_get_context (IDE_OBJECT (pipeline));
-  vcs = ide_context_get_vcs (context);
+  context = ide_object_ref_context (IDE_OBJECT (pipeline));
+  vcs = ide_vcs_ref_from_context (context);
   branch = ide_vcs_get_branch_name (vcs);
-  arch = ide_build_pipeline_get_arch (pipeline);
+  arch = ide_pipeline_get_arch (pipeline);
   name = g_strdup_printf ("%s-%s", arch, branch);
 
   g_strdelimit (name, G_DIR_SEPARATOR_S, '-');
@@ -116,7 +122,7 @@ gbp_flatpak_split_id (const gchar  *str,
 
   if (parts[i] != NULL)
     {
-      if (branch != NULL)
+      if (branch != NULL && !ide_str_empty0 (parts[i]))
         *branch = g_strdup (parts[i]);
     }
 

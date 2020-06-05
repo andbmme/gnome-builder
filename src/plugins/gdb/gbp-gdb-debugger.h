@@ -1,6 +1,6 @@
 /* gbp-gdb-debugger.h
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,11 +14,13 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #pragma once
 
-#include <ide.h>
+#include <libide-debugger.h>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wredundant-decls"
@@ -36,7 +38,6 @@ void                      gbp_gdb_debugger_connect            (GbpGdbDebugger   
                                                                GIOStream            *io_stream,
                                                                GCancellable         *cancellable);
 void                      gbp_gdb_debugger_exec_async         (GbpGdbDebugger       *self,
-                                                               IdeDebuggerThread    *thread,
                                                                const gchar          *command,
                                                                GCancellable         *cancellable,
                                                                GAsyncReadyCallback   callback,

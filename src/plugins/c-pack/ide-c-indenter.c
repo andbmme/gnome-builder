@@ -1,6 +1,6 @@
 /* ide-c-indenter.c
  *
- * Copyright © 2015 Christian Hergert <christian@hergert.me>
+ * Copyright 2015-2019 Christian Hergert <christian@hergert.me>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,12 +14,15 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "cindent"
 
 #include <glib/gi18n.h>
 #include <libpeas/peas.h>
+#include <libide-sourceview.h>
 
 #include "c-parse-helper.h"
 #include "ide-c-indenter.h"
@@ -51,14 +54,21 @@ struct _IdeCIndenter
 
 static void indenter_iface_init (IdeIndenterInterface *iface);
 
-G_DEFINE_DYNAMIC_TYPE_EXTENDED (IdeCIndenter, ide_c_indenter, IDE_TYPE_OBJECT, 0,
-                                G_IMPLEMENT_INTERFACE (IDE_TYPE_INDENTER, indenter_iface_init))
+G_DEFINE_TYPE_WITH_CODE (IdeCIndenter, ide_c_indenter, IDE_TYPE_OBJECT,
+                         G_IMPLEMENT_INTERFACE (IDE_TYPE_INDENTER, indenter_iface_init))
 
 enum {
   COMMENT_NONE,
   COMMENT_C89,
   COMMENT_C99
 };
+
+static inline gboolean
+text_iter_isspace (const GtkTextIter *iter)
+{
+  gunichar ch = gtk_text_iter_get_char (iter);
+  return g_unichar_isspace (ch);
+}
 
 static inline guint
 get_post_scope_indent (IdeCIndenter *c)
@@ -94,9 +104,9 @@ build_indent (IdeCIndenter *c,
   guint tab_width = gtk_source_view_get_tab_width (view);
   GtkTextIter iter;
   gunichar ch;
-  guint i;
 
   g_assert (tab_width > 0);
+  g_assert (str->len == 0);
 
   if (!line_offset)
     return;
@@ -111,14 +121,11 @@ build_indent (IdeCIndenter *c,
     switch (ch)
       {
       case '\t':
-        for (i = 0; i < tab_width; i++)
-          g_string_append (str, " ");
+        for (guint i = 0; i < tab_width; i++)
+          g_string_append_c (str, ' ');
         break;
 
       case ' ':
-        g_string_append_unichar (str, ch);
-        break;
-
       default:
         g_string_append_c (str, ' ');
         break;
@@ -132,30 +139,19 @@ build_indent (IdeCIndenter *c,
 
   if (c->use_tabs)
     {
-      GString *translated = g_string_new (NULL);
-      const gchar *pos = str->str;
-      const gchar *tab;
-      gchar *needle;
+      guint n_tabs;
+      guint n_spaces;
 
-      needle = g_malloc (c->tab_width + 1);
-      memset (needle, ' ', c->tab_width);
-      needle [c->tab_width] = '\0';
-
-      while (NULL != (tab = strstr (pos, needle)))
-        {
-          g_string_append_len (translated, pos, tab - pos);
-          g_string_append_c (translated, '\t');
-          pos = tab + c->tab_width;
-        }
-
-      if (*pos)
-        g_string_append (translated, pos);
+      n_tabs = str->len / tab_width;
+      n_spaces = str->len % tab_width;
 
       g_string_truncate (str, 0);
-      g_string_append_len (str, translated->str, translated->len);
-      g_string_free (translated, TRUE);
 
-      g_free (needle);
+      for (guint i = 0; i < n_tabs; i++)
+        g_string_append_c (str, '\t');
+
+      for (guint i = 0; i < n_spaces; i++)
+        g_string_append_c (str, ' ');
     }
 }
 
@@ -1317,6 +1313,8 @@ ide_c_indenter_format (IdeIndenter    *indenter,
   GtkTextIter begin_copy;
   gchar *ret = NULL;
   GtkTextBuffer *buffer;
+  IdeFileSettings *file_settings;
+  IdeIndentStyle indent_style = IDE_INDENT_STYLE_SPACES;
   guint tab_width = 2;
   gint indent_width = -1;
 
@@ -1335,19 +1333,40 @@ ide_c_indenter_format (IdeIndenter    *indenter,
         tab_width = indent_width;
     }
 
+  g_assert (IDE_IS_BUFFER (buffer));
+
+  if ((file_settings = ide_buffer_get_file_settings (IDE_BUFFER (buffer))))
+    indent_style = ide_file_settings_get_indent_style (file_settings);
+
   c->tab_width = tab_width;
   if (indent_width <= 0)
     c->indent_width = tab_width;
   else
     c->indent_width = indent_width;
-  c->use_tabs = !gtk_source_view_get_insert_spaces_instead_of_tabs (GTK_SOURCE_VIEW (view));
+
+  c->use_tabs =
+    !gtk_source_view_get_insert_spaces_instead_of_tabs (GTK_SOURCE_VIEW (view)) ||
+    indent_style == IDE_INDENT_STYLE_TABS;
 
   switch (event->keyval) {
   case GDK_KEY_Return:
   case GDK_KEY_KP_Enter:
-    gtk_text_iter_assign (&begin_copy, begin);
+    begin_copy = *begin;
     ret = c_indenter_indent (c, view, buffer, begin);
-    gtk_text_iter_assign (begin, &begin_copy);
+    *begin = begin_copy;
+
+    if (!ide_str_empty0 (ret))
+      {
+        /*
+         * If we have additional space after where our new indentation
+         * will occur, we should chomp it up so that the text starts
+         * immediately after our new indentation.
+         *
+         * GNOME/gnome-builder#545
+         */
+        while (text_iter_isspace (end) && !gtk_text_iter_ends_line (end))
+          gtk_text_iter_forward_char (end);
+      }
 
     /*
      * If we are inserting a newline right before a closing brace (for example
@@ -1449,11 +1468,6 @@ ide_c_indenter_class_init (IdeCIndenterClass *klass)
 }
 
 static void
-ide_c_indenter_class_finalize (IdeCIndenterClass *klass)
-{
-}
-
-static void
 ide_c_indenter_init (IdeCIndenter *self)
 {
   self->condition_indent = -1;
@@ -1461,10 +1475,4 @@ ide_c_indenter_init (IdeCIndenter *self)
   self->post_scope_indent = -1;
   self->directive_indent = G_MININT;
   self->case_indent = 0;
-}
-
-void
-_ide_c_indenter_register_type (GTypeModule *module)
-{
-  ide_c_indenter_register_type (module);
 }

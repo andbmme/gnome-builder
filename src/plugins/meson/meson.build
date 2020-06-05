@@ -1,28 +1,30 @@
-if get_option('with_meson')
+if get_option('plugin_meson')
 
-meson_resources = gnome.compile_resources(    
-  'gbp-meson-resources',                      
-  'meson.gresource.xml',                      
-  c_name: 'gbp_meson',                        
-)                                           
-
-meson_sources = [
-  'meson-plugin.c',
+plugins_sources += files([
+  'gbp-meson-build-stage-cross-file.c',
+  'gbp-meson-build-system-discovery.c',
   'gbp-meson-build-system.c',
-  'gbp-meson-build-system.h',
-  'gbp-meson-build-target.c',
-  'gbp-meson-build-target.h',
   'gbp-meson-build-target-provider.c',
-  'gbp-meson-build-target-provider.h',
+  'gbp-meson-build-target.c',
+  'gbp-meson-config-view-addin.c',
   'gbp-meson-pipeline-addin.c',
-  'gbp-meson-pipeline-addin.h',
   'gbp-meson-test-provider.c',
-  'gbp-meson-test-provider.h',
   'gbp-meson-test.c',
-  'gbp-meson-test.h',
-]
+  'gbp-meson-tool-row.c',
+  'gbp-meson-toolchain-edition-preferences-addin.c',
+  'gbp-meson-toolchain-edition-preferences-row.c',
+  'gbp-meson-toolchain-provider.c',
+  'gbp-meson-toolchain.c',
+  'gbp-meson-utils.c',
+  'meson-plugin.c',
+])
 
-gnome_builder_plugins_sources += files(meson_sources)       
-gnome_builder_plugins_sources += meson_resources[0]         
+plugin_meson_resources = gnome.compile_resources(
+  'gbp-meson-resources',
+  'meson.gresource.xml',
+  c_name: 'gbp_meson',
+)
+
+plugins_sources += plugin_meson_resources
 
 endif

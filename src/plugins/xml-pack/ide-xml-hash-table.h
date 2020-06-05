@@ -1,6 +1,6 @@
 /* ide-xml-hash-table.h
  *
- * Copyright © 2017 Sebastien Lafargue <slafargue@gnome.org>
+ * Copyright 2017 Sebastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,13 +14,15 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #pragma once
 
 #include <libxml/xmlstring.h>
 
-#include <glib.h>
+#include <glib-object.h>
 
 G_BEGIN_DECLS
 
@@ -30,7 +32,7 @@ typedef struct _IdeXmlHashTable IdeXmlHashTable;
 
 struct _IdeXmlHashTable
 {
-  guint ref_count;
+  volatile gint   ref_count;
 
   GHashTable     *table;
   GDestroyNotify  free_func;
@@ -44,6 +46,7 @@ typedef void (*IdeXmlHashTableArrayScanFunc) (const gchar *name,
                                               GPtrArray   *array,
                                               gpointer     data);
 
+GType                ide_xml_hash_table_get_type    (void);
 IdeXmlHashTable     *ide_xml_hash_table_new         (GDestroyNotify                free_func);
 gboolean             ide_xml_hash_table_add         (IdeXmlHashTable              *self,
                                                      const gchar                  *name,

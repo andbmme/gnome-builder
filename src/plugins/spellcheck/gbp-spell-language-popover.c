@@ -1,6 +1,6 @@
 /* gbp-spell-language-popover.c
  *
- * Copyright © 2017 Sébastien Lafargue <slafargue@gnome.org>
+ * Copyright 2017 Sébastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,15 +17,18 @@
  *
  * Adaptation of GspellLanguageChooserButton to show a popover
  * https://wiki.gnome.org/Projects/gspell
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-#include "gbp-spell-language-popover.h"
+#define G_LOG_DOMAIN "gbp-spell-language-popover"
+
+#include "config.h"
 
 #include <glib/gi18n.h>
-#include <dazzle.h>
+#include <libide-gui.h>
 
-#include "util/ide-gtk.h"
-#include "workbench/ide-workbench.h"
+#include "gbp-spell-language-popover.h"
 
 struct _GbpSpellLanguagePopover
 {

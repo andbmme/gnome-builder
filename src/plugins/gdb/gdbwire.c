@@ -1,5 +1,5 @@
 /**
- * Copyright © 2013 Robert Rossi <bob@brasko.net>
+ * Copyright 2013 Robert Rossi <bob@brasko.net>
  *
  * This file is an amalgamation of the source files from GDBWIRE.
  *
@@ -17,6 +17,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with GDBWIRE.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 /***** Begin file gdbwire_sys.c **********************************************/
@@ -609,6 +611,9 @@ gdbwire_logger_log(const char *file, int line, enum gdbwire_logger_level level,
     char *buf;
     int size;
 
+    if (fmt == NULL)
+      return;
+
     va_list ap;
     va_start(ap, fmt);
 
@@ -728,7 +733,7 @@ gdbwire_logger_log(const char *file, int line, enum gdbwire_logger_level level,
 
 /* Bison interface for Yacc-like parsers in C
 
-   Copyright © 1984, 1989-1990, 2000-2015 Free Software Foundation, Inc.
+   Copyright 1984, 1989-1990, 2000-2015 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -5345,7 +5350,7 @@ void gdbwire_mi_free (void * ptr , yyscan_t yyscanner)
 
 /* Bison implementation for Yacc-like parsers in C
 
-   Copyright © 1984, 1989-1990, 2000-2015 Free Software Foundation, Inc.
+   Copyright 1984, 1989-1990, 2000-2015 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -7450,7 +7455,7 @@ yypushreturn:
 /***** End of gdbwire_mi_grammar.c *******************************************/
 /***** Begin file gdbwire.c **************************************************/
 /**
- * Copyright © 2013 Robert Rossi <bob@brasko.net>
+ * Copyright 2013 Robert Rossi <bob@brasko.net>
  *
  * This file is part of GDBWIRE.
  *
@@ -7475,7 +7480,7 @@ yypushreturn:
 /***** Include gdbwire.h in the middle of gdbwire.c **************************/
 /***** Begin file gdbwire.h **************************************************/
 /**
- * Copyright © 2013 Robert Rossi <bob@brasko.net>
+ * Copyright 2013 Robert Rossi <bob@brasko.net>
  *
  * This file is part of GDBWIRE.
  *

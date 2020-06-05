@@ -1,6 +1,6 @@
 /* ide-ctags-symbol-node.c
  *
- * Copyright © 2016 Christian Hergert <chergert@redhat.com>
+ * Copyright 2016-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "ide-ctags-symbol-node"
@@ -37,21 +39,22 @@ ide_ctags_symbol_node_get_location_cb (GObject      *object,
                                        gpointer      user_data)
 {
   IdeCtagsSymbolResolver *resolver = (IdeCtagsSymbolResolver *)object;
-  g_autoptr(IdeSourceLocation) location = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeLocation) location = NULL;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
 
   g_assert (IDE_IS_CTAGS_SYMBOL_RESOLVER (resolver));
-  g_assert (G_IS_TASK (task));
+  g_assert (G_IS_ASYNC_RESULT (result));
+  g_assert (IDE_IS_TASK (task));
 
   location = ide_ctags_symbol_resolver_get_location_finish (resolver, result, &error);
 
   if (location == NULL)
-    g_task_return_error (task, g_steal_pointer (&error));
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
-    g_task_return_pointer (task,
-                           g_steal_pointer (&location),
-                           (GDestroyNotify)ide_source_location_unref);
+    ide_task_return_pointer (task,
+                             g_steal_pointer (&location),
+                             (GDestroyNotify)g_object_unref);
 }
 
 static void
@@ -61,12 +64,13 @@ ide_ctags_symbol_node_get_location_async (IdeSymbolNode       *node,
                                           gpointer             user_data)
 {
   IdeCtagsSymbolNode *self = (IdeCtagsSymbolNode *)node;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
 
   g_return_if_fail (IDE_IS_CTAGS_SYMBOL_NODE (self));
+  g_return_if_fail (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, ide_ctags_symbol_node_get_location_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, ide_ctags_symbol_node_get_location_async);
 
   ide_ctags_symbol_resolver_get_location_async (self->resolver,
                                                 self->index,
@@ -76,15 +80,15 @@ ide_ctags_symbol_node_get_location_async (IdeSymbolNode       *node,
                                                 g_steal_pointer (&task));
 }
 
-static IdeSourceLocation *
+static IdeLocation *
 ide_ctags_symbol_node_get_location_finish (IdeSymbolNode  *node,
                                            GAsyncResult   *result,
                                            GError        **error)
 {
   g_return_val_if_fail (IDE_IS_CTAGS_SYMBOL_NODE (node), NULL);
-  g_return_val_if_fail (G_IS_TASK (result), NULL);
+  g_return_val_if_fail (IDE_IS_TASK (result), NULL);
 
-  return g_task_propagate_pointer (G_TASK (result), error);
+  return ide_task_propagate_pointer (IDE_TASK (result), error);
 }
 
 static void

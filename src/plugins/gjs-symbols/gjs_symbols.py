@@ -2,9 +2,9 @@
 #
 # gjs_symbols.py
 #
-# Copyright © 2017 Patrick Griffi <tingping@tingping.se>
-# Copyright © 2017 Giovanni Campagna <gcampagn@cs.stanford.edu>
-# Copyright © 2018 Christian Hergert <chergert@redhat.com>
+# Copyright 2017 Patrick Griffi <tingping@tingping.se>
+# Copyright 2017 Giovanni Campagna <gcampagn@cs.stanford.edu>
+# Copyright 2018 Christian Hergert <chergert@redhat.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -21,13 +21,8 @@
 #
 
 import gi
-import os
 import json
 import threading
-
-gi.require_versions({
-    'Ide': '1.0',
-})
 
 from gi.repository import GLib
 from gi.repository import GObject
@@ -38,7 +33,7 @@ SYMBOL_PARAM_FLAGS=flags = GObject.ParamFlags.CONSTRUCT_ONLY | GObject.ParamFlag
 
 
 class JsSymbolNode(Ide.SymbolNode):
-    file = GObject.Property(type=Ide.File, flags=SYMBOL_PARAM_FLAGS)
+    file = GObject.Property(type=Gio.File, flags=SYMBOL_PARAM_FLAGS)
     line = GObject.Property(type=int, flags=SYMBOL_PARAM_FLAGS)
     col = GObject.Property(type=int, flags=SYMBOL_PARAM_FLAGS)
 
@@ -53,7 +48,7 @@ class JsSymbolNode(Ide.SymbolNode):
 
     def do_get_location_finish(self, result):
         if result.propagate_boolean():
-            return Ide.SourceLocation.new(self.file, self.line, self.col, 0)
+            return Ide.Location.new(self.file, self.line, self.col)
 
     def __len__(self):
         return len(self.children)
@@ -247,14 +242,19 @@ class JsSymbolTree(GObject.Object, Ide.SymbolTree):
 
 JS_SCRIPT = \
 """var data;
-if (ARGV[0] === '--file') {
-  const GLib = imports.gi.GLib;
-  var ret = GLib.file_get_contents(ARGV[1]);
-  data = ret[1];
-} else {
-  data = ARGV[0];
+try {
+    if (ARGV[0] === '--file') {
+        const GLib = imports.gi.GLib;
+        var ret = GLib.file_get_contents(ARGV[1]);
+        data = ret[1];
+    } else {
+        data = ARGV[0];
+    }
+    print(JSON.stringify(Reflect.parse(data, {source: '%s'})));
+} catch (e) {
+    imports.system.exit(1);
 }
-print(JSON.stringify(Reflect.parse(data, {source: '%s'})));""".replace('\n', ' ')
+""".replace('\n', ' ')
 
 
 class GjsSymbolProvider(Ide.Object, Ide.SymbolResolver):
@@ -264,17 +264,23 @@ class GjsSymbolProvider(Ide.Object, Ide.SymbolResolver):
     @staticmethod
     def _get_launcher(context, file_):
         file_path = file_.get_path()
-        script = JS_SCRIPT % file_path
-        unsaved_file = context.get_unsaved_files().get_unsaved_file(file_)
+        script = JS_SCRIPT % file_path.replace('\\', '\\\\').replace("'", "\\'")
+        unsaved_file = Ide.UnsavedFiles.from_context(context).get_unsaved_file(file_)
 
-        runtime = context.get_configuration_manager().get_current().get_runtime()
-        launcher = runtime.create_launcher()
+        if context.has_project():
+            runtime = Ide.ConfigManager.from_context(context).get_current().get_runtime()
+            launcher = runtime.create_launcher()
+        else:
+            launcher = Ide.SubprocessLauncher.new(0)
+
         launcher.set_flags(Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
         launcher.push_args(('gjs', '-c', script))
+
         if unsaved_file is not None:
             launcher.push_argv(unsaved_file.get_content().get_data().decode('utf-8'))
         else:
             launcher.push_args(('--file', file_path))
+
         return launcher
 
     def do_lookup_symbol_async(self, location, cancellable, callback, user_data=None):
@@ -301,8 +307,7 @@ class GjsSymbolProvider(Ide.Object, Ide.SymbolResolver):
                 task.return_error(GLib.Error('Failed to run gjs'))
                 return
 
-            ide_file = Ide.File(file=file_, context=self.get_context())
-            task.symbol_tree = JsSymbolTree(json.loads(stdout), ide_file)
+            task.symbol_tree = JsSymbolTree(json.loads(stdout), file_)
         except GLib.Error as err:
             task.return_error(err)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
@@ -319,46 +324,47 @@ class GjsSymbolProvider(Ide.Object, Ide.SymbolResolver):
     def do_load(self):
         pass
 
-    def do_find_references_async(self, location, cancellable, callback, user_data=None):
+    def do_find_references_async(self, location, language_id, cancellable, callback, user_data=None):
         task = Gio.Task.new(self, cancellable, callback)
         task.return_error(GLib.Error('Not implemented'))
 
     def do_find_references_finish(self, result):
-        result.propagate_boolean()
-        return None
+        return result.propagate_boolean()
 
     def do_find_nearest_scope_async(self, location, cancellable, callback, user_data=None):
         task = Gio.Task.new(self, cancellable, callback)
         task.return_error(GLib.Error('Not implemented'))
 
     def do_find_nearest_scope_finish(self, result):
-        result.propagate_boolean()
-        return None
+        return result.propagate_boolean()
 
 
 class JsCodeIndexEntries(GObject.Object, Ide.CodeIndexEntries):
     def __init__(self, file, entries):
         super().__init__()
         self.entries = entries
-        self.entry_iter = None
+        self.entry_iter = iter(entries)
         self.file = file
 
     def do_get_next_entry(self):
-        if self.entry_iter is None:
-            self.entry_iter = iter(self.entries)
-        try:
-            return next(self.entry_iter)
-        except StopIteration:
-            self.entry_iter = None
-            return None
+        if self.entry_iter is not None:
+            try:
+                return next(self.entry_iter)
+            except StopIteration:
+                self.entry_iter = None
+        return None
 
     def do_get_file(self):
         return self.file
 
 
 class GjsCodeIndexer(Ide.Object, Ide.CodeIndexer):
+    active = False
+    queue = None
+
     def __init__(self):
         super().__init__()
+        self.queue = []
 
     @staticmethod
     def _get_node_name(node):
@@ -382,26 +388,25 @@ class GjsCodeIndexer(Ide.Object, Ide.CodeIndexer):
         try:
             _, stdout, stderr = subprocess.communicate_utf8_finish(result)
 
-            ide_file = Ide.File(file=task.file, context=self.get_context())
             try:
-                root_node = JsSymbolTree._node_from_dict(json.loads(stdout), ide_file)
+                root_node = JsSymbolTree._node_from_dict(json.loads(stdout), task.file)
             except (json.JSONDecodeError, UnicodeDecodeError) as e:
                 raise GLib.Error('Failed to decode gjs json: {}'.format(e))
             except (IndexError, KeyError) as e:
                 raise GLib.Error('Failed to extract information from ast: {}'.format(e))
 
+            builder = Ide.CodeIndexEntryBuilder()
+
             entries = []
             # TODO: Avoid recreating the same data
             for node in self._flatten_node_list(root_node):
-                entry = Ide.CodeIndexEntry(
-                    key=node.props.file.get_path() + '|' + node.props.name, # Some unique value..
-                    name=self._get_node_name(node),
-                    kind=node.props.kind,
-                    flags=node.props.flags,
-                    begin_line=node.props.line + 1,  # Not sure why offset here doesn't match tree
-                    begin_line_offset=node.props.col + 1,
-                )
-                entries.append(entry)
+                builder.set_key(node.props.file.get_path() + '|' + node.props.name) # Some unique value..
+                builder.set_name(self._get_node_name(node))
+                builder.set_kind(node.props.kind)
+                builder.set_flags(node.props.flags)
+                # Not sure why offset here doesn't match tree
+                builder.set_range(node.props.line + 1, node.props.col + 1, 0, 0)
+                entries.append(builder.build())
 
             task.entries = JsCodeIndexEntries(task.file, entries)
             task.return_boolean(True)
@@ -410,10 +415,29 @@ class GjsCodeIndexer(Ide.Object, Ide.CodeIndexer):
             print(repr(ex))
             task.return_error(GLib.Error(message=repr(ex)))
 
+        finally:
+            try:
+                if self.queue:
+                    task = self.queue.pop(0)
+                    launcher = GjsSymbolProvider._get_launcher(self.get_context(), task.file)
+                    proc = launcher.spawn()
+                    proc.communicate_utf8_async(None, task.get_cancellable(), self._index_file_cb, task)
+                    return
+            except Exception as ex:
+                print(repr(ex))
+
+            self.active = False
+
     def do_index_file_async(self, file_, build_flags, cancellable, callback, data):
         task = Gio.Task.new(self, cancellable, callback)
         task.entries = None
         task.file = file_
+
+        if self.active:
+            self.queue.append(task)
+            return
+
+        self.active = True
 
         launcher = GjsSymbolProvider._get_launcher(self.get_context(), file_)
         proc = launcher.spawn()
@@ -423,7 +447,7 @@ class GjsCodeIndexer(Ide.Object, Ide.CodeIndexer):
         if result.propagate_boolean():
             return result.entries
 
-    def do_generate_key_async(self, location, cancellable, callback, user_data=None):
+    def do_generate_key_async(self, location, flags, cancellable, callback, user_data=None):
         # print('generate key')
         task = Gio.Task.new(self, cancellable, callback)
         task.return_error(GLib.Error('Not implemented'))

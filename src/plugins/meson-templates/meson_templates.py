@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # __init__.py
 #
-# Copyright © 2016 Patrick Griffis <tingping@tingping.se>
+# Copyright 2016 Patrick Griffis <tingping@tingping.se>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -20,9 +20,6 @@ import gi
 import os
 from os import path
 
-gi.require_version('Ide', '1.0')
-gi.require_version('Template', '1.0')
-
 from gi.repository import (
     Ide,
     Gio,
@@ -38,8 +35,8 @@ class LibraryTemplateProvider(GObject.Object, Ide.TemplateProvider):
     def do_get_project_templates(self):
         return [GnomeProjectTemplate(),
                 LibraryProjectTemplate(),
+                CLIProjectTemplate(),
                 EmptyProjectTemplate()]
-
 
 class MesonTemplateLocator(Template.TemplateLocator):
     license = None
@@ -98,14 +95,14 @@ class MesonTemplate(Ide.TemplateBase, Ide.ProjectTemplate):
     def do_expand_async(self, params, cancellable, callback, data):
         self.reset()
 
-        task = Gio.Task.new(self, cancellable, callback)
+        task = Ide.Task.new(self, cancellable, callback)
 
         if 'language' in params:
             self.language = params['language'].get_string().lower()
         else:
             self.language = 'c'
 
-        if self.language not in ('c', 'c♯', 'c++', 'javascript', 'python', 'vala'):
+        if self.language not in ('c', 'c♯', 'c++', 'javascript', 'python', 'vala', 'rust'):
             task.return_error(GLib.Error('Language %s not supported' % self.language))
             return
 
@@ -123,21 +120,23 @@ class MesonTemplate(Ide.TemplateBase, Ide.ProjectTemplate):
         scope.get('template').assign_string(self.id)
 
         name = params['name'].get_string().lower()
-        name_ = name.lower().replace('-', '_')
+        name_ = ''.join([c if c.isalnum() else '_' for c in name])
         scope.get('name').assign_string(name)
         scope.get('name_').assign_string(name_)
-        scope.get('NAME').assign_string(name.upper().replace('-','_'))
+        scope.get('NAME').assign_string(name_.upper())
 
-        # TODO: Support setting app id
-        appid = 'org.gnome.' + name.title()
+        if 'app-id' in params:
+            appid = params['app-id'].get_string()
+        else:
+            appid = 'org.example.App'
         appid_path = '/' + appid.replace('.', '/')
         scope.get('appid').assign_string(appid)
         scope.get('appid_path').assign_string(appid_path)
 
-        prefix = name if not name.endswith('-glib') else name[:-5]
-        PREFIX = prefix.upper().replace('-','_')
-        prefix_ = prefix.lower().replace('-','_')
-        PreFix = ''.join([word.capitalize() for word in prefix.lower().split('-')])
+        prefix = name_ if not name_.endswith('_glib') else name_[:-5]
+        PREFIX = prefix.upper()
+        prefix_ = prefix.lower()
+        PreFix = ''.join([word.capitalize() for word in prefix.lower().split('_')])
 
         scope.get('prefix').assign_string(prefix)
         scope.get('Prefix').assign_string(prefix.capitalize())
@@ -224,7 +223,7 @@ class MesonTemplate(Ide.TemplateBase, Ide.ProjectTemplate):
             if src.startswith('resource://'):
                 self.add_resource(src[11:], destination, scope, modes.get(src, 0))
             else:
-                path = os.path.join('/org/gnome/builder/plugins/meson_templates', src)
+                path = os.path.join('/plugins/meson_templates', src)
                 self.add_resource(path, destination, scope, modes.get(src, 0))
 
         self.expand_all_async(cancellable, self.expand_all_cb, task)
@@ -250,7 +249,7 @@ class GnomeProjectTemplate(MesonTemplate):
             _('GNOME Application'),
             'pattern-gnome',
             _('Create a new GNOME application'),
-            ['C', 'C++', 'C♯', 'Python', 'JavaScript', 'Vala'],
+            ['C', 'C++', 'C♯', 'Python', 'JavaScript', 'Vala', 'Rust'],
             0
          )
 
@@ -298,11 +297,17 @@ class GnomeProjectTemplate(MesonTemplate):
             meson_file = 'resources/src/meson-js.build'
         elif self.language == 'python':
             files['resources/src/hello.py.in'] = 'src/%(name)s.in'
-            files['resources/src/gi_composites.py'] = 'src/gi_composites.py'
             files['resources/src/__init__.py'] = 'src/__init__.py'
             files['resources/src/window.py'] = 'src/window.py'
             files['resources/src/main.py'] = 'src/main.py'
             meson_file = 'resources/src/meson-py.build'
+        elif self.language == 'rust':
+            files['resources/src/config.rs.in'] = 'src/config.rs.in'
+            files['resources/src/main.rs'] = 'src/main.rs'
+            files['resources/src/window.rs'] = 'src/window.rs'
+            files['resources/src/Cargo.toml'] = 'Cargo.toml'
+            files['resources/build-aux/cargo.sh'] = 'build-aux/cargo.sh'
+            meson_file = 'resources/src/meson-rs.build'
 
         if resource_name:
             files['resources/src/hello.gresource.xml'] = resource_name
@@ -326,6 +331,7 @@ class LibraryProjectTemplate(MesonTemplate):
     def prepare_files(self, files):
         if self.language == 'c':
             files['resources/src/meson-clib.build'] = 'src/meson.build'
+            files['resources/src/hello.c'] = 'src/%(name)s.c'
             files['resources/src/hello.h'] = 'src/%(name)s.h'
             files['resources/src/hello-version.h.in'] = 'src/%(prefix)s-version.h.in'
 
@@ -337,10 +343,36 @@ class EmptyProjectTemplate(MesonTemplate):
             _('Empty Project'),
             'pattern-cli',
             _('Create a new empty project'),
-            ['C', 'C++', 'JavaScript', 'Python', 'Vala'],
+            ['C', 'C++', 'C♯', 'JavaScript', 'Python', 'Vala', 'Rust'],
             200
          )
 
     def prepare_files(self, files):
         files['resources/src/meson-empty.build'] = 'src/meson.build'
 
+        if self.language == 'rust':
+            files['resources/src/Cargo-cli.toml'] = 'Cargo.toml'
+
+
+class CLIProjectTemplate(MesonTemplate):
+    def __init__(self):
+        super().__init__(
+            'cli',
+            _('Command Line Tool'),
+            'pattern-cli',
+            _('Create a new command line project'),
+            ['C', 'Vala', 'Rust'],
+            200
+         )
+
+    def prepare_files(self, files):
+        files['resources/src/meson-cli.build'] = 'src/meson.build'
+
+        if self.language == 'c':
+            files['resources/src/main-cli.c'] = 'src/main.c'
+        elif self.language == 'vala':
+            files['resources/src/main-cli.vala'] = 'src/main.vala'
+        elif self.language == 'rust':
+            files['resources/src/main-cli.rs'] = 'src/main.rs'
+            files['resources/src/Cargo-cli.toml'] = 'Cargo.toml'
+            files['resources/build-aux/cargo.sh'] = 'build-aux/cargo.sh'

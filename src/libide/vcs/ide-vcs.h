@@ -1,6 +1,6 @@
 /* ide-vcs.h
  *
- * Copyright © 2015 Christian Hergert <christian@hergert.me>
+ * Copyright 2015-2019 Christian Hergert <christian@hergert.me>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,30 +14,33 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #pragma once
 
-#include <gio/gio.h>
+#if !defined (IDE_VCS_INSIDE) && !defined (IDE_VCS_COMPILATION)
+# error "Only <libide-vcs.h> can be included directly."
+#endif
 
-#include "ide-version-macros.h"
+#include <libide-core.h>
 
-#include "ide-object.h"
-#include "vcs/ide-vcs-config.h"
+#include "ide-vcs-branch.h"
+#include "ide-vcs-config.h"
 
 G_BEGIN_DECLS
 
 #define IDE_TYPE_VCS (ide_vcs_get_type())
 
+IDE_AVAILABLE_IN_3_32
 G_DECLARE_INTERFACE (IdeVcs, ide_vcs, IDE, VCS, IdeObject)
 
 struct _IdeVcsInterface
 {
   GTypeInterface            parent_interface;
 
-  GFile                  *(*get_working_directory)     (IdeVcs               *self);
-  IdeBufferChangeMonitor *(*get_buffer_change_monitor) (IdeVcs               *self,
-                                                        IdeBuffer            *buffer);
+  GFile                  *(*get_workdir)               (IdeVcs               *self);
   gboolean                (*is_ignored)                (IdeVcs               *self,
                                                         GFile                *file,
                                                         GError              **error);
@@ -55,51 +58,109 @@ struct _IdeVcsInterface
   GListModel             *(*list_status_finish)        (IdeVcs               *self,
                                                         GAsyncResult         *result,
                                                         GError              **error);
+  void                    (*list_branches_async)       (IdeVcs               *self,
+                                                        GCancellable         *cancellable,
+                                                        GAsyncReadyCallback   callback,
+                                                        gpointer              user_data);
+  GPtrArray              *(*list_branches_finish)      (IdeVcs               *self,
+                                                        GAsyncResult         *result,
+                                                        GError              **error);
+  void                    (*list_tags_async)           (IdeVcs               *self,
+                                                        GCancellable         *cancellable,
+                                                        GAsyncReadyCallback   callback,
+                                                        gpointer              user_data);
+  GPtrArray              *(*list_tags_finish)          (IdeVcs               *self,
+                                                        GAsyncResult         *result,
+                                                        GError              **error);
+  void                    (*switch_branch_async)       (IdeVcs               *self,
+                                                        IdeVcsBranch         *branch,
+                                                        GCancellable         *cancellable,
+                                                        GAsyncReadyCallback   callback,
+                                                        gpointer              user_data);
+  gboolean                (*switch_branch_finish)      (IdeVcs               *self,
+                                                        GAsyncResult         *result,
+                                                        GError              **error);
+  void                    (*push_branch_async)         (IdeVcs               *self,
+                                                        IdeVcsBranch         *branch,
+                                                        GCancellable         *cancellable,
+                                                        GAsyncReadyCallback   callback,
+                                                        gpointer              user_data);
+  gboolean                (*push_branch_finish)        (IdeVcs               *self,
+                                                        GAsyncResult         *result,
+                                                        GError              **error);
 };
 
-IDE_AVAILABLE_IN_ALL
-void                    ide_vcs_register_ignored          (const gchar          *pattern);
-IDE_AVAILABLE_IN_ALL
-IdeBufferChangeMonitor *ide_vcs_get_buffer_change_monitor (IdeVcs               *self,
-                                                           IdeBuffer            *buffer);
-IDE_AVAILABLE_IN_ALL
-GFile                  *ide_vcs_get_working_directory     (IdeVcs               *self);
-IDE_AVAILABLE_IN_ALL
-void                    ide_vcs_new_async                 (IdeContext           *context,
-                                                           int                   io_priority,
-                                                           GCancellable         *cancellable,
-                                                           GAsyncReadyCallback   callback,
-                                                           gpointer              user_data);
-IDE_AVAILABLE_IN_ALL
-IdeVcs                 *ide_vcs_new_finish                (GAsyncResult         *result,
-                                                           GError              **error);
-IDE_AVAILABLE_IN_ALL
-gboolean                ide_vcs_is_ignored                (IdeVcs               *self,
-                                                           GFile                *file,
-                                                           GError              **error);
-IDE_AVAILABLE_IN_3_28
-gboolean                ide_vcs_path_is_ignored           (IdeVcs               *self,
-                                                           const gchar          *path,
-                                                           GError              **error);
-IDE_AVAILABLE_IN_ALL
-gint                    ide_vcs_get_priority              (IdeVcs               *self);
-IDE_AVAILABLE_IN_ALL
-void                    ide_vcs_emit_changed              (IdeVcs               *self);
-IDE_AVAILABLE_IN_ALL
-IdeVcsConfig           *ide_vcs_get_config                (IdeVcs               *self);
-IDE_AVAILABLE_IN_ALL
-gchar                  *ide_vcs_get_branch_name           (IdeVcs               *self);
-IDE_AVAILABLE_IN_3_28
-void                    ide_vcs_list_status_async         (IdeVcs               *self,
-                                                           GFile                *directory_or_file,
-                                                           gboolean              include_descendants,
-                                                           gint                  io_priority,
-                                                           GCancellable         *cancellable,
-                                                           GAsyncReadyCallback   callback,
-                                                           gpointer              user_data);
-IDE_AVAILABLE_IN_3_28
-GListModel             *ide_vcs_list_status_finish        (IdeVcs               *self,
-                                                           GAsyncResult         *result,
-                                                           GError              **error);
+IDE_AVAILABLE_IN_3_32
+IdeVcs       *ide_vcs_from_context         (IdeContext           *context);
+IDE_AVAILABLE_IN_3_32
+IdeVcs       *ide_vcs_ref_from_context     (IdeContext           *context);
+IDE_AVAILABLE_IN_3_32
+GFile        *ide_vcs_get_workdir          (IdeVcs               *self);
+IDE_AVAILABLE_IN_3_32
+gboolean      ide_vcs_is_ignored           (IdeVcs               *self,
+                                            GFile                *file,
+                                            GError              **error);
+IDE_AVAILABLE_IN_3_32
+gboolean      ide_vcs_path_is_ignored      (IdeVcs               *self,
+                                            const gchar          *path,
+                                            GError              **error);
+IDE_AVAILABLE_IN_3_32
+gint          ide_vcs_get_priority         (IdeVcs               *self);
+IDE_AVAILABLE_IN_3_32
+void          ide_vcs_emit_changed         (IdeVcs               *self);
+IDE_AVAILABLE_IN_3_32
+IdeVcsConfig *ide_vcs_get_config           (IdeVcs               *self);
+IDE_AVAILABLE_IN_3_32
+gchar        *ide_vcs_get_branch_name      (IdeVcs               *self);
+IDE_AVAILABLE_IN_3_32
+void          ide_vcs_list_status_async    (IdeVcs               *self,
+                                            GFile                *directory_or_file,
+                                            gboolean              include_descendants,
+                                            gint                  io_priority,
+                                            GCancellable         *cancellable,
+                                            GAsyncReadyCallback   callback,
+                                            gpointer              user_data);
+IDE_AVAILABLE_IN_3_32
+GListModel   *ide_vcs_list_status_finish   (IdeVcs               *self,
+                                            GAsyncResult         *result,
+                                            GError              **error);
+IDE_AVAILABLE_IN_3_32
+void          ide_vcs_list_branches_async  (IdeVcs               *self,
+                                            GCancellable         *cancellable,
+                                            GAsyncReadyCallback   callback,
+                                            gpointer              user_data);
+IDE_AVAILABLE_IN_3_32
+GPtrArray    *ide_vcs_list_branches_finish (IdeVcs               *self,
+                                            GAsyncResult         *result,
+                                            GError              **error);
+IDE_AVAILABLE_IN_3_32
+void          ide_vcs_list_tags_async      (IdeVcs               *self,
+                                            GCancellable         *cancellable,
+                                            GAsyncReadyCallback   callback,
+                                            gpointer              user_data);
+IDE_AVAILABLE_IN_3_32
+GPtrArray    *ide_vcs_list_tags_finish     (IdeVcs               *self,
+                                            GAsyncResult         *result,
+                                            GError              **error);
+IDE_AVAILABLE_IN_3_32
+void          ide_vcs_switch_branch_async  (IdeVcs               *self,
+                                            IdeVcsBranch         *branch,
+                                            GCancellable         *cancellable,
+                                            GAsyncReadyCallback   callback,
+                                            gpointer              user_data);
+IDE_AVAILABLE_IN_3_32
+gboolean      ide_vcs_switch_branch_finish (IdeVcs               *self,
+                                            GAsyncResult         *result,
+                                            GError              **error);
+IDE_AVAILABLE_IN_3_34
+void          ide_vcs_push_branch_async    (IdeVcs               *self,
+                                            IdeVcsBranch         *branch,
+                                            GCancellable         *cancellable,
+                                            GAsyncReadyCallback   callback,
+                                            gpointer              user_data);
+IDE_AVAILABLE_IN_3_34
+gboolean      ide_vcs_push_branch_finish   (IdeVcs               *self,
+                                            GAsyncResult         *result,
+                                            GError              **error);
 
 G_END_DECLS

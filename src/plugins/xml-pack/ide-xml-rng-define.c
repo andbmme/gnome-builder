@@ -1,6 +1,6 @@
 /* ide-xml-rng-define.c
  *
- * Copyright © 2017 Sebastien Lafargue <slafargue@gnome.org>
+ * Copyright 2017 Sebastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,14 +14,17 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
+
+#include <dazzle.h>
 
 #include "ide-xml-rng-define.h"
 
 G_DEFINE_BOXED_TYPE (IdeXmlRngDefine, ide_xml_rng_define, ide_xml_rng_define_ref, ide_xml_rng_define_unref)
 
-static gchar *type_names [] =
-{
+static const gchar *type_names [] = {
   "noop",
   "define",
   "empty",
@@ -183,7 +186,7 @@ IdeXmlRngDefine *
 ide_xml_rng_define_ref (IdeXmlRngDefine *self)
 {
   g_return_val_if_fail (self, NULL);
-  g_return_val_if_fail (self->ref_count, NULL);
+  g_return_val_if_fail (self->ref_count > 0, NULL);
 
   g_atomic_int_inc (&self->ref_count);
 
@@ -194,7 +197,7 @@ void
 ide_xml_rng_define_unref (IdeXmlRngDefine *self)
 {
   g_return_if_fail (self);
-  g_return_if_fail (self->ref_count);
+  g_return_if_fail (self->ref_count > 0);
 
   if (g_atomic_int_dec_and_test (&self->ref_count))
     ide_xml_rng_define_free (self);

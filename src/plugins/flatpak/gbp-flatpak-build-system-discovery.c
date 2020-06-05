@@ -1,6 +1,6 @@
 /* gbp-flatpak-build-system-discovery.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gbp-flatpak-build-system-discovery"
@@ -49,6 +51,9 @@ gbp_flatpak_build_system_discovery_find_manifests (GFile        *directory,
   g_assert (results != NULL);
   g_assert (depth < DISCOVERY_MAX_DEPTH);
 
+  if (g_cancellable_is_cancelled (cancellable))
+    return;
+
   enumerator = g_file_enumerate_children (directory,
                                           G_FILE_ATTRIBUTE_STANDARD_IS_SYMLINK","
                                           G_FILE_ATTRIBUTE_STANDARD_NAME","
@@ -57,12 +62,14 @@ gbp_flatpak_build_system_discovery_find_manifests (GFile        *directory,
                                           cancellable,
                                           NULL);
 
+  if (enumerator == NULL)
+    return;
+
   while (NULL != (infoptr = g_file_enumerator_next_file (enumerator, cancellable, NULL)))
     {
       g_autoptr(GFileInfo) info = infoptr;
       g_autoptr(GMatchInfo) match_info = NULL;
       g_autoptr(GFile) file = NULL;
-      g_autofree gchar *path = NULL;
       GFileType file_type;
       const gchar *name;
 
@@ -191,6 +198,10 @@ gbp_flatpak_build_system_discovery_discover (IdeBuildSystemDiscovery  *discovery
             buildsystem = "cmake";
           else if (dzl_str_equal0 (buildsystem, "simple"))
             buildsystem = "directory";
+
+          /* Set priority higher than normal discoveries */
+          if (priority != NULL)
+            *priority = -1000;
 
           ret = g_strdup (buildsystem);
           IDE_TRACE_MSG ("Discovered buildsystem of type \"%s\"", ret);

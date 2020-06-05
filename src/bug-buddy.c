@@ -1,6 +1,6 @@
 /* bug-buddy.c
  *
- * Copyright © 2017 Christian Hergert <christian@hergert.me>
+ * Copyright 2017-2019 Christian Hergert <christian@hergert.me>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #include <signal.h>
@@ -35,7 +37,7 @@
 
 static gchar **gdb_argv = NULL;
 
-static void
+G_GNUC_NORETURN static void
 bug_buddy_sigsegv_handler (int signum)
 {
   int pid;
@@ -73,16 +75,16 @@ bug_buddy_init (void)
 
   argv = g_ptr_array_sized_new (12);
   g_ptr_array_add (argv, gdb_path);
-  g_ptr_array_add (argv, "-batch");
-  g_ptr_array_add (argv, "-nx");
-  g_ptr_array_add (argv, "-ex");
+  g_ptr_array_add (argv, (gchar *)"-batch");
+  g_ptr_array_add (argv, (gchar *)"-nx");
+  g_ptr_array_add (argv, (gchar *)"-ex");
   g_ptr_array_add (argv, g_strdup_printf ("attach %"G_PID_FORMAT, getpid ()));
-  g_ptr_array_add (argv, "-ex");
-  g_ptr_array_add (argv, "info threads");
-  g_ptr_array_add (argv, "-ex");
-  g_ptr_array_add (argv, "thread apply all bt");
-  g_ptr_array_add (argv, "-ex");
-  g_ptr_array_add (argv, "info sharedlibrary");
+  g_ptr_array_add (argv, (gchar *)"-ex");
+  g_ptr_array_add (argv, (gchar *)"info threads");
+  g_ptr_array_add (argv, (gchar *)"-ex");
+  g_ptr_array_add (argv, (gchar *)"thread apply all bt");
+  g_ptr_array_add (argv, (gchar *)"-ex");
+  g_ptr_array_add (argv, (gchar *)"info sharedlibrary");
   g_ptr_array_add (argv, NULL);
   gdb_argv = (gchar **)g_ptr_array_free (argv, FALSE);
 

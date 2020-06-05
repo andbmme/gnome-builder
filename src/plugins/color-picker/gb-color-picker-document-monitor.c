@@ -1,6 +1,6 @@
 /* gb-color-picker-document-monitor.c
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #include "gb-color-picker-helper.h"
@@ -514,7 +516,7 @@ gb_color_picker_document_monitor_set_buffer (GbColorPickerDocumentMonitor *self,
   if (self->buffer != buffer && self->buffer != NULL)
     stop_monitor (self);
 
-  if (dzl_set_weak_pointer (&self->buffer, buffer))
+  if (g_set_weak_pointer (&self->buffer, buffer))
     {
       g_object_notify_by_pspec (G_OBJECT (self), properties [PROP_BUFFER]);
 
@@ -544,7 +546,7 @@ gb_color_picker_document_monitor_finalize (GObject *object)
 {
   GbColorPickerDocumentMonitor *self = (GbColorPickerDocumentMonitor *)object;
 
-  dzl_clear_weak_pointer (&self->buffer);
+  g_clear_weak_pointer (&self->buffer);
 
   G_OBJECT_CLASS (gb_color_picker_document_monitor_parent_class)->finalize (object);
 }

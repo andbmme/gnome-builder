@@ -1,6 +1,6 @@
 /* gstyle-palette-widget.c
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gstyle-palette-widget"
@@ -669,11 +671,9 @@ static GtkWidget *
 create_palette_list_item (gpointer item,
                           gpointer user_data)
 {
-  GstylePaletteWidget *self = (GstylePaletteWidget *)user_data;
   GstyleColor *color = (GstyleColor *)item;
   GtkWidget *row;
 
-  g_assert (GSTYLE_IS_PALETTE_WIDGET (self));
   g_assert (GSTYLE_IS_COLOR (color));
 
   row = g_object_new (GSTYLE_TYPE_COLOR_WIDGET,
@@ -689,14 +689,12 @@ static GtkWidget *
 create_palette_flow_item (gpointer item,
                           gpointer user_data)
 {
-  GstylePaletteWidget *self = (GstylePaletteWidget *)user_data;
   GstyleColor *color = (GstyleColor *)item;
   g_autofree gchar *color_string = NULL;
   g_autofree gchar *tooltip = NULL;
   const gchar *name;
   GtkWidget *swatch;
 
-  g_assert (GSTYLE_IS_PALETTE_WIDGET (self));
   g_assert (GSTYLE_IS_COLOR (color));
 
   name = gstyle_color_get_name (color);
@@ -1592,7 +1590,7 @@ gstyle_palette_widget_init (GstylePaletteWidget *self)
   GtkStyleContext *context;
 
   static const GtkTargetEntry dnd_targets [] = {
-    {"GSTYLE_COLOR_WIDGET", GTK_TARGET_SAME_APP, 0},
+    { (gchar *)"GSTYLE_COLOR_WIDGET", GTK_TARGET_SAME_APP, 0 },
   };
 
   gtk_widget_init_template (GTK_WIDGET (self));

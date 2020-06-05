@@ -1,6 +1,6 @@
 /* ide-xml-rng-grammar.c
  *
- * Copyright © 2017 Sebastien Lafargue <slafargue@gnome.org>
+ * Copyright 2017 Sebastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #include "ide-xml-rng-grammar.h"
@@ -25,14 +27,9 @@ dump_defines_func (const gchar *name,
                    GPtrArray   *array,
                    gpointer     data)
 {
-  IdeXmlRngGrammar *self = (IdeXmlRngGrammar *)data;
-  IdeXmlRngDefine *def;
-
-  g_assert (self != NULL);
-
-  for (gint i = 0; i <array->len; ++i)
+  for (guint i = 0; i < array->len; ++i)
     {
-      def = g_ptr_array_index (array, i);
+      IdeXmlRngDefine *def = g_ptr_array_index (array, i);
       ide_xml_rng_define_dump_tree (def, TRUE);
     }
 }
@@ -110,7 +107,7 @@ IdeXmlRngGrammar *
 ide_xml_rng_grammar_ref (IdeXmlRngGrammar *self)
 {
   g_return_val_if_fail (self != NULL, NULL);
-  g_return_val_if_fail (self->ref_count, NULL);
+  g_return_val_if_fail (self->ref_count > 0, NULL);
 
   g_atomic_int_inc (&self->ref_count);
 
@@ -121,7 +118,7 @@ void
 ide_xml_rng_grammar_unref (IdeXmlRngGrammar *self)
 {
   g_return_if_fail (self != NULL);
-  g_return_if_fail (self->ref_count);
+  g_return_if_fail (self->ref_count > 0);
 
   if (g_atomic_int_dec_and_test (&self->ref_count))
     ide_xml_rng_grammar_free (self);

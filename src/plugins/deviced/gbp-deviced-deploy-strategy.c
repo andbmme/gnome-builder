@@ -1,6 +1,6 @@
 /* gbp-deviced-deploy-strategy.c
  *
- * Copyright 2018 Christian Hergert <chergert@redhat.com>
+ * Copyright 2018-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -33,7 +33,7 @@ struct _GbpDevicedDeployStrategy
 
 typedef struct
 {
-  IdeBuildPipeline      *pipeline;
+  IdePipeline      *pipeline;
   GbpDevicedDevice      *device;
   gchar                 *app_id;
   gchar                 *flatpak_path;
@@ -58,41 +58,41 @@ deploy_state_free (DeployState *state)
 
 static void
 gbp_deviced_deploy_strategy_load_async (IdeDeployStrategy   *strategy,
-                                        IdeBuildPipeline    *pipeline,
+                                        IdePipeline    *pipeline,
                                         GCancellable        *cancellable,
                                         GAsyncReadyCallback  callback,
                                         gpointer             user_data)
 {
   GbpDevicedDeployStrategy *self = (GbpDevicedDeployStrategy *)strategy;
-  g_autoptr(GTask) task = NULL;
-  IdeConfiguration *config;
+  g_autoptr(IdeTask) task = NULL;
+  IdeConfig *config;
   IdeDevice *device;
 
   IDE_ENTRY;
 
   g_assert (GBP_IS_DEVICED_DEPLOY_STRATEGY (self));
-  g_assert (IDE_IS_BUILD_PIPELINE (pipeline));
+  g_assert (IDE_IS_PIPELINE (pipeline));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, gbp_deviced_deploy_strategy_load_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, gbp_deviced_deploy_strategy_load_async);
 
-  config = ide_build_pipeline_get_configuration (pipeline);
+  config = ide_pipeline_get_config (pipeline);
 
-  if (!(device = ide_build_pipeline_get_device (pipeline)) ||
+  if (!(device = ide_pipeline_get_device (pipeline)) ||
       !GBP_IS_DEVICED_DEVICE (device) ||
       !GBP_IS_FLATPAK_MANIFEST (config))
     {
-      g_task_return_new_error (task,
-                               G_IO_ERROR,
-                               G_IO_ERROR_NOT_SUPPORTED,
-                               "%s is not supported by %s",
-                               G_OBJECT_TYPE_NAME (device),
-                               G_OBJECT_TYPE_NAME (self));
+      ide_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_NOT_SUPPORTED,
+                                 "%s is not supported by %s",
+                                 device ?  G_OBJECT_TYPE_NAME (device) : "(nil)",
+                                 G_OBJECT_TYPE_NAME (self));
       IDE_EXIT;
     }
 
-  g_task_return_boolean (task, TRUE);
+  ide_task_return_boolean (task, TRUE);
 
   IDE_EXIT;
 }
@@ -104,18 +104,18 @@ deploy_install_bundle_cb (GObject      *object,
 {
   GbpDevicedDevice *device = (GbpDevicedDevice *)object;
   g_autoptr(GError) error = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
 
   IDE_ENTRY;
 
   g_assert (GBP_IS_DEVICED_DEVICE (device));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   if (!gbp_deviced_device_install_bundle_finish (device, result, &error))
-    g_task_return_error (task, g_steal_pointer (&error));
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
-    g_task_return_boolean (task, TRUE);
+    ide_task_return_boolean (task, TRUE);
 
   IDE_EXIT;
 }
@@ -139,7 +139,7 @@ deploy_wait_check_cb (GObject      *object,
                       gpointer      user_data)
 {
   IdeSubprocess *subprocess = (IdeSubprocess *)object;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autoptr(GError) error = NULL;
   DeployState *state;
 
@@ -147,17 +147,17 @@ deploy_wait_check_cb (GObject      *object,
 
   g_assert (IDE_IS_SUBPROCESS (subprocess));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
-  state = g_task_get_task_data (task);
+  state = ide_task_get_task_data (task);
 
   if (!ide_subprocess_wait_check_finish (subprocess, result, &error))
-    g_task_return_error (task, g_steal_pointer (&error));
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
     gbp_deviced_device_install_bundle_async (state->device,
                                              state->flatpak_path,
                                              deploy_progress_cb, state, NULL,
-                                             g_task_get_cancellable (task),
+                                             ide_task_get_cancellable (task),
                                              deploy_install_bundle_cb,
                                              g_object_ref (task));
 
@@ -171,7 +171,7 @@ deploy_get_commit_cb (GObject      *object,
 {
   GbpDevicedDevice *device = (GbpDevicedDevice *)object;
   g_autoptr(IdeSubprocessLauncher) launcher = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   g_autofree gchar *commit_id = NULL;
   g_autofree gchar *dest_path = NULL;
   g_autofree gchar *name = NULL;
@@ -179,7 +179,9 @@ deploy_get_commit_cb (GObject      *object,
   g_autofree gchar *staging_dir = NULL;
   g_autoptr(IdeSubprocess) subprocess = NULL;
   g_autoptr(GError) error = NULL;
-  IdeConfiguration *config;
+  g_autoptr(IdeTriplet) triplet = NULL;
+  IdeConfig *config;
+  IdeToolchain *toolchain;
   const gchar *arch;
   const gchar *app_id;
   DeployState *state;
@@ -190,20 +192,22 @@ deploy_get_commit_cb (GObject      *object,
   g_assert (IDE_IS_MAIN_THREAD ());
   g_assert (GBP_IS_DEVICED_DEVICE (device));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
-  state = g_task_get_task_data (task);
+  state = ide_task_get_task_data (task);
   g_assert (state != NULL);
-  g_assert (IDE_IS_BUILD_PIPELINE (state->pipeline));
+  g_assert (IDE_IS_PIPELINE (state->pipeline));
 
   commit_id = gbp_deviced_device_get_commit_finish (device, result, NULL);
 
   context = ide_object_get_context (IDE_OBJECT (state->pipeline));
-  config = ide_build_pipeline_get_configuration (state->pipeline);
-  arch = ide_build_pipeline_get_arch (state->pipeline);
+  config = ide_pipeline_get_config (state->pipeline);
+  toolchain = ide_pipeline_get_toolchain (state->pipeline);
+  triplet = ide_toolchain_get_host_triplet (toolchain);
+  arch = ide_triplet_get_arch (triplet);
   staging_dir = gbp_flatpak_get_staging_dir (state->pipeline);
   repo_dir = gbp_flatpak_get_repo_dir (context);
-  app_id = ide_configuration_get_app_id (config);
+  app_id = ide_config_get_app_id (config);
 #if 0
   if (commit_id != NULL)
     name = g_strdup_printf ("%s-%s.flatpak", app_id, commit_id);
@@ -240,13 +244,13 @@ deploy_get_commit_cb (GObject      *object,
     }
 #endif
 
-  ide_build_pipeline_attach_pty (state->pipeline, launcher);
+  ide_pipeline_attach_pty (state->pipeline, launcher);
 
   if (!(subprocess = ide_subprocess_launcher_spawn (launcher, NULL, &error)))
-    g_task_return_error (task, g_steal_pointer (&error));
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
     ide_subprocess_wait_check_async (subprocess,
-                                     g_task_get_cancellable (task),
+                                     ide_task_get_cancellable (task),
                                      deploy_wait_check_cb,
                                      g_object_ref (task));
 
@@ -258,17 +262,17 @@ deploy_commit_cb (GObject      *object,
                   GAsyncResult *result,
                   gpointer      user_data)
 {
-  IdeBuildPipeline *pipeline = (IdeBuildPipeline *)object;
+  IdePipeline *pipeline = (IdePipeline *)object;
   g_autoptr(GError) error = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   GCancellable *cancellable;
   DeployState *state;
 
   IDE_ENTRY;
 
-  g_assert (IDE_IS_BUILD_PIPELINE (pipeline));
+  g_assert (IDE_IS_PIPELINE (pipeline));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   /*
    * If we successfully exported the build to a repo, we can now check
@@ -276,11 +280,11 @@ deploy_commit_cb (GObject      *object,
    * some data transfer by building a static-delta.
    */
 
-  cancellable = g_task_get_cancellable (task);
-  state = g_task_get_task_data (task);
+  cancellable = ide_task_get_cancellable (task);
+  state = ide_task_get_task_data (task);
 
-  if (!ide_build_pipeline_build_finish (pipeline, result, &error))
-    g_task_return_error (task, g_steal_pointer (&task));
+  if (!ide_pipeline_build_finish (pipeline, result, &error))
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
     gbp_deviced_device_get_commit_async (state->device,
                                          state->app_id,
@@ -293,7 +297,7 @@ deploy_commit_cb (GObject      *object,
 
 static void
 gbp_deviced_deploy_strategy_deploy_async (IdeDeployStrategy     *strategy,
-                                          IdeBuildPipeline      *pipeline,
+                                          IdePipeline      *pipeline,
                                           GFileProgressCallback  progress,
                                           gpointer               progress_data,
                                           GDestroyNotify         progress_data_destroy,
@@ -302,26 +306,30 @@ gbp_deviced_deploy_strategy_deploy_async (IdeDeployStrategy     *strategy,
                                           gpointer               user_data)
 {
   GbpDevicedDeployStrategy *self = (GbpDevicedDeployStrategy *)strategy;
-  g_autoptr(GTask) task = NULL;
-  IdeConfiguration *config;
+  g_autoptr(IdeTask) task = NULL;
+  g_autoptr(IdeTriplet) triplet = NULL;
+  IdeConfig *config;
   DeployState *state;
   const gchar *app_id;
   const gchar *arch;
   IdeDevice *device;
+  IdeToolchain *toolchain;
 
   IDE_ENTRY;
 
   g_assert (GBP_IS_DEVICED_DEPLOY_STRATEGY (self));
-  g_assert (IDE_IS_BUILD_PIPELINE (pipeline));
+  g_assert (IDE_IS_PIPELINE (pipeline));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, gbp_deviced_deploy_strategy_deploy_async);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, gbp_deviced_deploy_strategy_deploy_async);
 
-  config = ide_build_pipeline_get_configuration (pipeline);
-  device = ide_build_pipeline_get_device (pipeline);
-  arch = ide_build_pipeline_get_arch (pipeline);
-  app_id = ide_configuration_get_app_id (config);
+  config = ide_pipeline_get_config (pipeline);
+  device = ide_pipeline_get_device (pipeline);
+  toolchain = ide_pipeline_get_toolchain (pipeline);
+  triplet = ide_toolchain_get_host_triplet (toolchain);
+  arch = ide_triplet_get_arch (triplet);
+  app_id = ide_config_get_app_id (config);
 
   g_assert (GBP_IS_FLATPAK_MANIFEST (config));
   g_assert (GBP_IS_DEVICED_DEVICE (device));
@@ -333,15 +341,15 @@ gbp_deviced_deploy_strategy_deploy_async (IdeDeployStrategy     *strategy,
   state->progress = progress;
   state->progress_data = progress_data;
   state->progress_data_destroy = progress_data_destroy;
-  g_task_set_task_data (task, state, (GDestroyNotify)deploy_state_free);
+  ide_task_set_task_data (task, state, deploy_state_free);
 
   /*
    * First make sure we've built up to the point where we have a
    * build-finish/build-export in the flatpak plugin.
    */
 
-  ide_build_pipeline_build_async (pipeline,
-                                  IDE_BUILD_PHASE_COMMIT,
+  ide_pipeline_build_async (pipeline,
+                                  IDE_PIPELINE_PHASE_COMMIT,
                                   cancellable,
                                   deploy_commit_cb,
                                   g_steal_pointer (&task));

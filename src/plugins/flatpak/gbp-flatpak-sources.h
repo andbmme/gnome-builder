@@ -1,6 +1,6 @@
 /* gbp-flatpak-sources.h
  *
- * Copyright © 2016 Endless Mobile, Inc.
+ * Copyright 2016 Endless Mobile, Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,18 +14,19 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #pragma once
 
-GFile    *fetch_archive (const gchar  *url,
-                         const gchar  *sha,
-                         const gchar  *module_name,
-                         GFile        *destination,
-                         guint         strip_components,
-                         GError      **error);
-
-gboolean  apply_patch (const gchar  *path,
-                       GFile        *source_dir,
-                       guint         strip_components,
-                       GError      **error);
+GFile    *gbp_flatpak_sources_fetch_archive (const gchar  *url,
+                                             const gchar  *sha,
+                                             const gchar  *module_name,
+                                             GFile        *destination,
+                                             guint         strip_components,
+                                             GError      **error);
+gboolean  gbp_flatpak_sources_apply_patch   (const gchar  *path,
+                                             GFile        *source_dir,
+                                             guint         strip_components,
+                                             GError      **error);

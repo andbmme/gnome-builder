@@ -1,6 +1,6 @@
 /* gb-flatpak-runtime.c
  *
- * Copyright © 2016 Christian Hergert <chergert@redhat.com>
+ * Copyright 2016-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gbp-flatpak-runtime"
@@ -33,7 +35,9 @@ struct _GbpFlatpakRuntime
 {
   IdeRuntime parent_instance;
 
-  gchar *arch;
+  GHashTable *program_paths_cache;
+
+  IdeTriplet *triplet;
   gchar *branch;
   gchar *deploy_dir;
   gchar *platform;
@@ -46,7 +50,7 @@ G_DEFINE_TYPE (GbpFlatpakRuntime, gbp_flatpak_runtime, IDE_TYPE_RUNTIME)
 
 enum {
   PROP_0,
-  PROP_ARCH,
+  PROP_TRIPLET,
   PROP_BRANCH,
   PROP_DEPLOY_DIR,
   PROP_PLATFORM,
@@ -56,24 +60,28 @@ enum {
 
 static GParamSpec *properties [N_PROPS];
 
+static inline gboolean
+strv_empty (gchar **strv)
+{
+  return strv == NULL || strv[0] == NULL;
+}
+
 static const gchar *
 get_builddir (GbpFlatpakRuntime *self)
 {
-  IdeContext *context = ide_object_get_context (IDE_OBJECT (self));
-  IdeBuildManager *build_manager = ide_context_get_build_manager (context);
-  IdeBuildPipeline *pipeline = ide_build_manager_get_pipeline (build_manager);
-  const gchar *builddir = ide_build_pipeline_get_builddir (pipeline);
+  g_autoptr(IdeContext) context = ide_object_ref_context (IDE_OBJECT (self));
+  g_autoptr(IdeBuildManager) build_manager = ide_build_manager_ref_from_context (context);
+  g_autoptr(IdePipeline) pipeline = ide_build_manager_ref_pipeline (build_manager);
 
-  return builddir;
+  return ide_pipeline_get_builddir (pipeline);
 }
-
 
 static gchar *
 get_staging_directory (GbpFlatpakRuntime *self)
 {
-  IdeContext *context = ide_object_get_context (IDE_OBJECT (self));
-  IdeBuildManager *build_manager = ide_context_get_build_manager (context);
-  IdeBuildPipeline *pipeline = ide_build_manager_get_pipeline (build_manager);
+  g_autoptr(IdeContext) context = ide_object_ref_context (IDE_OBJECT (self));
+  g_autoptr(IdeBuildManager) build_manager = ide_build_manager_ref_from_context (context);
+  g_autoptr(IdePipeline) pipeline = ide_build_manager_ref_pipeline (build_manager);
 
   return gbp_flatpak_get_staging_dir (pipeline);
 }
@@ -83,42 +91,40 @@ gbp_flatpak_runtime_contains_program_in_path (IdeRuntime   *runtime,
                                               const gchar  *program,
                                               GCancellable *cancellable)
 {
+  static const gchar *known_path_dirs[] = { "/bin" };
   GbpFlatpakRuntime *self = (GbpFlatpakRuntime *)runtime;
-  g_autoptr(IdeSubprocessLauncher) launcher = NULL;
-  g_autoptr(IdeSubprocess) subprocess = NULL;
-  g_autofree gchar *arch = NULL;
+  gboolean ret = FALSE;
+  gpointer val = NULL;
 
   g_assert (GBP_IS_FLATPAK_RUNTIME (self));
   g_assert (program != NULL);
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  arch = g_strdup_printf ("--arch=%s", self->arch);
+  if (g_hash_table_lookup_extended (self->program_paths_cache, program, NULL, &val))
+    return GPOINTER_TO_UINT (val);
 
-  /*
-   * To check if a program is available, we don't want to use the normal
-   * launcher because it will only be available if the build directory
-   * has been created and setup. Instead, we will use flatpak to run the
-   * runtime which was added in Flatpak 0.6.13.
-   */
-  launcher = ide_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
-                                          G_SUBPROCESS_FLAGS_STDERR_SILENCE);
+  for (guint i = 0; i < G_N_ELEMENTS (known_path_dirs); i++)
+    {
+      g_autofree gchar *path = NULL;
 
-  ide_subprocess_launcher_set_run_on_host (launcher, TRUE);
-  ide_subprocess_launcher_set_clear_env (launcher, FALSE);
+      path = g_build_filename (self->deploy_dir,
+                               "files",
+                               known_path_dirs[i],
+                               program,
+                               NULL);
 
-  ide_subprocess_launcher_push_argv (launcher, "flatpak");
-  ide_subprocess_launcher_push_argv (launcher, "run");
-  ide_subprocess_launcher_push_argv (launcher, arch);
-  ide_subprocess_launcher_push_argv (launcher, "--command=which");
-  ide_subprocess_launcher_push_argv (launcher, self->sdk);
-  ide_subprocess_launcher_push_argv (launcher, program);
+      if (g_file_test (path, G_FILE_TEST_IS_EXECUTABLE))
+        {
+          ret = TRUE;
+          break;
+        }
+    }
 
-  subprocess = ide_subprocess_launcher_spawn (launcher, cancellable, NULL);
+  g_hash_table_insert (self->program_paths_cache,
+                       (gchar *)g_intern_string (program),
+                       GUINT_TO_POINTER (ret));
 
-  if (subprocess != NULL)
-    return ide_subprocess_wait_check (subprocess, cancellable, NULL);
-
-  return FALSE;
+  return ret;
 }
 
 static IdeSubprocessLauncher *
@@ -127,53 +133,47 @@ gbp_flatpak_runtime_create_launcher (IdeRuntime  *runtime,
 {
   IdeSubprocessLauncher *ret;
   GbpFlatpakRuntime *self = (GbpFlatpakRuntime *)runtime;
+  g_autoptr(IdeContext) context = NULL;
+  const gchar *runtime_id;
 
   g_return_val_if_fail (GBP_IS_FLATPAK_RUNTIME (self), NULL);
 
+  context = ide_object_ref_context (IDE_OBJECT (self));
+  g_return_val_if_fail (IDE_IS_CONTEXT (context), NULL);
+
+  runtime_id = ide_runtime_get_id (runtime);
+  g_return_val_if_fail (g_str_has_prefix (runtime_id, "flatpak:"), NULL);
+
   ret = gbp_flatpak_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE);
 
-  if (ret != NULL)
+  if (ret != NULL && !ide_context_has_project (context))
     {
-      g_autofree gchar *project_name = NULL;
-      g_autofree gchar *project_path = NULL;
+      ide_subprocess_launcher_set_cwd (ret, g_get_home_dir ());
+      ide_subprocess_launcher_set_run_on_host (ret, TRUE);
+      gbp_flatpak_subprocess_launcher_use_run (GBP_FLATPAK_SUBPROCESS_LAUNCHER (ret),
+                                               runtime_id + strlen ("flatpak:"));
+    }
+  else if (ret != NULL)
+    {
       g_autofree gchar *build_path = NULL;
       g_autofree gchar *ccache_dir = NULL;
       g_auto(GStrv) new_environ = NULL;
       const gchar *builddir = NULL;
+      const gchar *project_path = NULL;
       const gchar * const *build_args = NULL;
-      GFile *project_file;
-      IdeContext *context;
-      IdeConfigurationManager *config_manager;
-      IdeConfiguration *configuration;
+      g_autoptr(IdeConfigManager) config_manager = NULL;
+      IdeConfig *configuration;
+      IdeVcs *vcs;
 
-      context = ide_object_get_context (IDE_OBJECT (self));
-      config_manager = ide_context_get_configuration_manager (context);
-      configuration = ide_configuration_manager_get_current (config_manager);
+      config_manager = ide_config_manager_ref_from_context (context);
+      configuration = ide_config_manager_ref_current (config_manager);
 
       build_path = get_staging_directory (self);
       builddir = get_builddir (self);
 
       /* Find the project directory path */
-      project_file = ide_context_get_project_file (context);
-      if (project_file != NULL)
-        {
-          g_autofree gchar *project_file_path = NULL;
-
-          project_file_path = g_file_get_path (project_file);
-          if (g_file_test (project_file_path, G_FILE_TEST_IS_DIR))
-            {
-              project_path = g_file_get_path (project_file);
-              project_name = g_file_get_basename (project_file);
-            }
-          else
-            {
-              g_autoptr(GFile) project_dir = NULL;
-
-              project_dir = g_file_get_parent (project_file);
-              project_path = g_file_get_path (project_dir);
-              project_name = g_file_get_basename (project_dir);
-            }
-        }
+      vcs = ide_vcs_ref_from_context (context);
+      project_path = g_file_peek_path (ide_vcs_get_workdir (vcs));
 
       /* Add 'flatpak build' and the specified arguments to the launcher */
       ide_subprocess_launcher_push_argv (ret, "flatpak");
@@ -200,25 +200,24 @@ gbp_flatpak_runtime_create_launcher (IdeRuntime  *runtime,
                                      NULL);
       ide_subprocess_launcher_setenv (ret, "CCACHE_DIR", ccache_dir, FALSE);
 
-      if (!dzl_str_empty0 (project_path))
+      if (!ide_str_empty0 (project_path))
         {
           g_autofree gchar *filesystem_option_src = NULL;
           g_autofree gchar *filesystem_option_build = NULL;
           g_autofree gchar *filesystem_option_cache = NULL;
-          g_autofree gchar *build_dir_option = NULL;
 
           filesystem_option_src = g_strdup_printf ("--filesystem=%s", project_path);
           filesystem_option_build = g_strdup_printf ("--filesystem=%s", builddir);
           filesystem_option_cache = g_strdup_printf ("--filesystem=%s/gnome-builder", g_get_user_cache_dir ());
-          build_dir_option = g_strdup_printf ("--build-dir=%s", builddir);
           ide_subprocess_launcher_push_argv (ret, "--nofilesystem=host");
           ide_subprocess_launcher_push_argv (ret, filesystem_option_cache);
           ide_subprocess_launcher_push_argv (ret, filesystem_option_src);
           ide_subprocess_launcher_push_argv (ret, filesystem_option_build);
-          ide_subprocess_launcher_push_argv (ret, build_dir_option);
         }
-      new_environ = ide_configuration_get_environ (IDE_CONFIGURATION (configuration));
-      if (g_strv_length (new_environ) > 0)
+
+      new_environ = ide_config_get_environ (IDE_CONFIG (configuration));
+
+      if (!strv_empty (new_environ))
         {
           for (guint i = 0; new_environ[i]; i++)
             {
@@ -244,41 +243,26 @@ gbp_flatpak_runtime_create_launcher (IdeRuntime  *runtime,
 }
 
 static gchar *
-get_binary_name (GbpFlatpakRuntime *self,
-                 IdeBuildTarget    *build_target)
+get_manifst_command (GbpFlatpakRuntime *self)
 {
   IdeContext *context = ide_object_get_context (IDE_OBJECT (self));
-  IdeConfigurationManager *config_manager = ide_context_get_configuration_manager (context);
-  IdeConfiguration *config = ide_configuration_manager_get_current (config_manager);
+  IdeConfigManager *config_manager = ide_config_manager_from_context (context);
+  IdeConfig *config = ide_config_manager_get_current (config_manager);
 
   if (GBP_IS_FLATPAK_MANIFEST (config))
     {
       const gchar *command;
 
       command = gbp_flatpak_manifest_get_command (GBP_FLATPAK_MANIFEST (config));
-      if (!dzl_str_empty0 (command))
+      if (!ide_str_empty0 (command))
         return g_strdup (command);
     }
 
-  /* Use the build target name if there's no command in the manifest */
-  {
-    g_autofree gchar *build_target_name = NULL;
-
-    build_target_name = ide_build_target_get_name (build_target);
-    if (!dzl_str_empty0 (build_target_name))
-      return g_steal_pointer (&build_target_name);
-  }
-
-  /* Use the project name as a last resort */
-  {
-    IdeProject *project;
-
-    project = ide_context_get_project (context);
-    return g_strdup (ide_project_get_name (project));
-  }
+  /* Use the project id as a last resort */
+  return ide_context_dup_project_id (context);
 }
 
-IdeRunner *
+static IdeRunner *
 gbp_flatpak_runtime_create_runner (IdeRuntime     *runtime,
                                    IdeBuildTarget *build_target)
 {
@@ -294,26 +278,23 @@ gbp_flatpak_runtime_create_runner (IdeRuntime     *runtime,
   context = ide_object_get_context (IDE_OBJECT (self));
   build_path = get_staging_directory (self);
 
-  if (build_target != NULL)
-    binary_name = get_binary_name (self, build_target);
+  binary_name = get_manifst_command (self);
 
-  runner = IDE_RUNNER (gbp_flatpak_runner_new (context, build_path, binary_name));
-  if (build_target != NULL)
-    ide_runner_set_build_target (runner, build_target);
+  if ((runner = IDE_RUNNER (gbp_flatpak_runner_new (context, build_path, build_target, binary_name))))
+    ide_object_append (IDE_OBJECT (self), IDE_OBJECT (runner));
 
   return runner;
 }
 
 static void
-gbp_flatpak_runtime_prepare_configuration (IdeRuntime       *runtime,
-                                           IdeConfiguration *configuration)
+gbp_flatpak_runtime_prepare_configuration (IdeRuntime *runtime,
+                                           IdeConfig  *config)
 {
-  GbpFlatpakRuntime* self = (GbpFlatpakRuntime *)runtime;
+  g_assert (GBP_IS_FLATPAK_RUNTIME (runtime));
+  g_assert (IDE_IS_CONFIG (config));
 
-  g_assert (GBP_IS_FLATPAK_RUNTIME (self));
-  g_assert (IDE_IS_CONFIGURATION (configuration));
-
-  ide_configuration_set_prefix (configuration, "/app");
+  ide_config_set_prefix (config, "/app");
+  ide_config_set_prefix_set (config, FALSE);
 }
 
 static void
@@ -360,7 +341,8 @@ gbp_flatpak_runtime_get_runtime_dir (GbpFlatpakRuntime *self)
            */
           deploy_path = g_file_get_path (self->deploy_dir_files);
           path = g_build_filename (deploy_path, "..", "..", "..", "..", "..",
-                                   name, self->arch, self->branch, "active", "files",
+                                   name, ide_triplet_get_arch (self->triplet),
+                                   self->branch, "active", "files",
                                    NULL);
           if (g_file_test (path, G_FILE_TEST_IS_DIR))
             {
@@ -459,25 +441,25 @@ gbp_flatpak_runtime_translate_file (IdeRuntime *runtime,
   return NULL;
 }
 
-const gchar *
-gbp_flatpak_runtime_get_arch (GbpFlatpakRuntime *self)
+IdeTriplet *
+gbp_flatpak_runtime_get_triplet (GbpFlatpakRuntime *self)
 {
   g_return_val_if_fail (GBP_IS_FLATPAK_RUNTIME (self), NULL);
 
-  return self->arch;
+  return self->triplet;
 }
 
-void
-gbp_flatpak_runtime_set_arch (GbpFlatpakRuntime *self,
-                              const gchar       *arch)
+static void
+gbp_flatpak_runtime_set_triplet (GbpFlatpakRuntime *self,
+                                 IdeTriplet        *triplet)
 {
   g_return_if_fail (GBP_IS_FLATPAK_RUNTIME (self));
 
-  if (g_strcmp0 (arch, self->arch) != 0)
+  if (self->triplet != triplet)
     {
-      g_free (self->arch);
-      self->arch = g_strdup (arch);
-      g_object_notify_by_pspec (G_OBJECT (self), properties [PROP_ARCH]);
+      g_clear_pointer (&self->triplet, ide_triplet_unref);
+      self->triplet = ide_triplet_ref (triplet);
+      g_object_notify_by_pspec (G_OBJECT (self), properties [PROP_TRIPLET]);
     }
 }
 
@@ -489,7 +471,7 @@ gbp_flatpak_runtime_get_branch (GbpFlatpakRuntime *self)
   return self->branch;
 }
 
-void
+static void
 gbp_flatpak_runtime_set_branch (GbpFlatpakRuntime *self,
                                 const gchar       *branch)
 {
@@ -511,7 +493,7 @@ gbp_flatpak_runtime_get_platform (GbpFlatpakRuntime *self)
   return self->platform;
 }
 
-void
+static void
 gbp_flatpak_runtime_set_platform (GbpFlatpakRuntime *self,
                                   const gchar       *platform)
 {
@@ -548,7 +530,7 @@ gbp_flatpak_runtime_get_sdk_name (GbpFlatpakRuntime *self)
     return g_strndup (self->sdk, slash - self->sdk);
 }
 
-void
+static void
 gbp_flatpak_runtime_set_sdk (GbpFlatpakRuntime *self,
                              const gchar       *sdk)
 {
@@ -569,10 +551,17 @@ gbp_flatpak_runtime_get_system_include_dirs (IdeRuntime *runtime)
   return g_strdupv ((gchar **)include_dirs);
 }
 
-static gchar *
-gbp_flatpak_runtime_real_get_arch (IdeRuntime *runtime)
+static IdeTriplet *
+gbp_flatpak_runtime_real_get_triplet (IdeRuntime *runtime)
 {
-  return g_strdup (GBP_FLATPAK_RUNTIME (runtime)->arch);
+  return ide_triplet_ref (GBP_FLATPAK_RUNTIME (runtime)->triplet);
+}
+
+static gboolean
+gbp_flatpak_runtime_supports_toolchain (IdeRuntime   *self,
+                                        IdeToolchain *toolchain)
+{
+  return FALSE;
 }
 
 static void
@@ -585,8 +574,8 @@ gbp_flatpak_runtime_get_property (GObject    *object,
 
   switch (prop_id)
     {
-    case PROP_ARCH:
-      g_value_set_string (value, gbp_flatpak_runtime_get_arch (self));
+    case PROP_TRIPLET:
+      g_value_set_boxed (value, gbp_flatpak_runtime_get_triplet (self));
       break;
 
     case PROP_BRANCH:
@@ -620,8 +609,8 @@ gbp_flatpak_runtime_set_property (GObject      *object,
 
   switch (prop_id)
     {
-    case PROP_ARCH:
-      gbp_flatpak_runtime_set_arch (self, g_value_get_string (value));
+    case PROP_TRIPLET:
+      gbp_flatpak_runtime_set_triplet (self, g_value_get_boxed (value));
       break;
 
     case PROP_BRANCH:
@@ -650,12 +639,13 @@ gbp_flatpak_runtime_finalize (GObject *object)
 {
   GbpFlatpakRuntime *self = (GbpFlatpakRuntime *)object;
 
-  g_clear_pointer (&self->arch, g_free);
+  g_clear_pointer (&self->triplet, ide_triplet_unref);
   g_clear_pointer (&self->branch, g_free);
   g_clear_pointer (&self->runtime_dir, g_free);
   g_clear_pointer (&self->deploy_dir, g_free);
   g_clear_pointer (&self->platform, g_free);
   g_clear_pointer (&self->sdk, g_free);
+  g_clear_pointer (&self->program_paths_cache, g_hash_table_unref);
   g_clear_object (&self->deploy_dir_files);
 
   G_OBJECT_CLASS (gbp_flatpak_runtime_parent_class)->finalize (object);
@@ -677,13 +667,14 @@ gbp_flatpak_runtime_class_init (GbpFlatpakRuntimeClass *klass)
   runtime_class->prepare_configuration = gbp_flatpak_runtime_prepare_configuration;
   runtime_class->translate_file = gbp_flatpak_runtime_translate_file;
   runtime_class->get_system_include_dirs = gbp_flatpak_runtime_get_system_include_dirs;
-  runtime_class->get_arch = gbp_flatpak_runtime_real_get_arch;
+  runtime_class->get_triplet = gbp_flatpak_runtime_real_get_triplet;
+  runtime_class->supports_toolchain = gbp_flatpak_runtime_supports_toolchain;
 
-  properties [PROP_ARCH] =
-    g_param_spec_string ("arch",
-                         "Arch",
-                         "Arch",
-                         flatpak_get_default_arch (),
+  properties [PROP_TRIPLET] =
+    g_param_spec_boxed ("triplet",
+                         "Triplet",
+                         "Architecture Triplet",
+                         IDE_TYPE_TRIPLET,
                          (G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
 
   properties [PROP_BRANCH] =
@@ -720,6 +711,7 @@ gbp_flatpak_runtime_class_init (GbpFlatpakRuntimeClass *klass)
 static void
 gbp_flatpak_runtime_init (GbpFlatpakRuntime *self)
 {
+  self->program_paths_cache = g_hash_table_new (g_str_hash, g_str_equal);
 }
 
 static gchar *
@@ -734,8 +726,8 @@ locate_deploy_dir (const gchar *sdk_id)
 }
 
 GbpFlatpakRuntime *
-gbp_flatpak_runtime_new (IdeContext           *context,
-                         FlatpakInstalledRef  *ref,
+gbp_flatpak_runtime_new (FlatpakInstalledRef  *ref,
+                         gboolean              is_extension,
                          GCancellable         *cancellable,
                          GError              **error)
 {
@@ -746,29 +738,55 @@ gbp_flatpak_runtime_new (IdeContext           *context,
   g_autofree gchar *id = NULL;
   g_autofree gchar *display_name = NULL;
   g_autofree gchar *triplet = NULL;
-  g_autoptr(FlatpakRef) sdk_ref = NULL;
+  g_autofree gchar *runtime_name = NULL;
+  g_autoptr(IdeTriplet) triplet_object = NULL;
+  g_autoptr(GString) category = NULL;
   const gchar *name;
   const gchar *arch;
   const gchar *branch;
   const gchar *deploy_dir;
 
-  g_return_val_if_fail (IDE_IS_CONTEXT (context), NULL);
   g_return_val_if_fail (FLATPAK_IS_INSTALLED_REF (ref), NULL);
+  g_return_val_if_fail (!cancellable || G_IS_CANCELLABLE (cancellable), NULL);
+
+  arch = flatpak_ref_get_arch (FLATPAK_REF (ref));
 
   name = flatpak_ref_get_name (FLATPAK_REF (ref));
-  arch = flatpak_ref_get_arch (FLATPAK_REF (ref));
   branch = flatpak_ref_get_branch (FLATPAK_REF (ref));
   deploy_dir = flatpak_installed_ref_get_deploy_dir (ref);
+  triplet_object = ide_triplet_new (arch);
   triplet = g_strdup_printf ("%s/%s/%s", name, arch, branch);
   id = g_strdup_printf ("flatpak:%s", triplet);
 
-  metadata = flatpak_installed_ref_load_metadata (ref, cancellable, error);
-  if (metadata == NULL)
+  category = g_string_new ("Flatpak/");
+
+  if (g_str_has_prefix (name, "org.gnome."))
+    g_string_append (category, "GNOME/");
+  else if (g_str_has_prefix (name, "org.freedesktop."))
+    g_string_append (category, "FreeDesktop.org/");
+  else if (g_str_has_prefix (name, "org.kde."))
+    g_string_append (category, "KDE/");
+
+  if (ide_str_equal0 (flatpak_get_default_arch (), arch))
+    g_string_append (category, name);
+  else
+    g_string_append_printf (category, "%s (%s)", name, arch);
+
+  if (!(metadata = flatpak_installed_ref_load_metadata (ref, cancellable, error)))
     return NULL;
 
   keyfile = g_key_file_new ();
   if (!g_key_file_load_from_bytes (keyfile, metadata, 0, error))
     return NULL;
+
+  if (g_key_file_has_group (keyfile, "ExtensionOf") && !is_extension)
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_NOT_SUPPORTED,
+                   "Runtime is an extension");
+      return NULL;
+    }
 
   sdk = g_key_file_get_string (keyfile, "Runtime", "sdk", NULL);
 
@@ -777,18 +795,24 @@ gbp_flatpak_runtime_new (IdeContext           *context,
   else
     display_name = g_strdup_printf (_("%s <b>%s</b> <span fgalpha='36044'>%s</span>"), name, branch, arch);
 
+  runtime_name = g_strdup_printf ("%s %s", _("Flatpak"), triplet);
+
   /*
    * If we have an SDK that is different from this runtime, we need to locate
    * the SDK deploy-dir instead (for things like includes, pkg-config, etc).
    */
-  if (sdk != NULL && !g_str_equal (sdk, triplet) && NULL != (sdk_deploy_dir = locate_deploy_dir (sdk)))
-    deploy_dir = sdk_deploy_dir;
+  if (!is_extension)
+    {
+      if (sdk != NULL && !g_str_equal (sdk, triplet) && NULL != (sdk_deploy_dir = locate_deploy_dir (sdk)))
+        deploy_dir = sdk_deploy_dir;
+    }
 
   return g_object_new (GBP_TYPE_FLATPAK_RUNTIME,
-                       "context", context,
                        "id", id,
-                       "arch", arch,
+                       "triplet", triplet_object,
                        "branch", branch,
+                       "category", category->str,
+                       "name", runtime_name,
                        "deploy-dir", deploy_dir,
                        "display-name", display_name,
                        "platform", name,

@@ -1,6 +1,6 @@
 /* ide-source-view.c
  *
- * Copyright © 2015 Christian Hergert <christian@hergert.me>
+ * Copyright 2015-2019 Christian Hergert <christian@hergert.me>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,56 +14,41 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "ide-source-view"
 
+#include "config.h"
+
 #include <cairo-gobject.h>
 #include <dazzle.h>
 #include <glib/gi18n.h>
+#include <libide-code.h>
+#include <libide-plugins.h>
+#include <libide-threading.h>
 #include <stdlib.h>
+#include <string.h>
 
-#include "ide-context.h"
-#include "ide-debug.h"
-#include "ide-enums.h"
+#include "ide-buffer-private.h"
 
-#include "application/ide-application.h"
-#include "buffers/ide-buffer-manager.h"
-#include "buffers/ide-buffer.h"
-#include "buffers/ide-buffer-private.h"
-#include "diagnostics/ide-diagnostic.h"
-#include "diagnostics/ide-fixit.h"
-#include "diagnostics/ide-source-location.h"
-#include "diagnostics/ide-source-range.h"
-#include "files/ide-file-settings.h"
-#include "files/ide-file.h"
-#include "plugins/ide-extension-adapter.h"
-#include "plugins/ide-extension-set-adapter.h"
-#include "rename/ide-rename-provider.h"
-#include "snippets/ide-source-snippet-chunk.h"
-#include "snippets/ide-source-snippet-completion-provider.h"
-#include "snippets/ide-source-snippet-context.h"
-#include "snippets/ide-source-snippet-private.h"
-#include "snippets/ide-source-snippet.h"
-#include "snippets/ide-source-snippets-manager.h"
-#include "sourceview/ide-completion-provider.h"
-#include "sourceview/ide-cursor.h"
-#include "sourceview/ide-indenter.h"
-#include "sourceview/ide-omni-gutter-renderer.h"
-#include "sourceview/ide-omni-gutter-renderer-private.h"
-#include "sourceview/ide-source-iter.h"
-#include "sourceview/ide-source-view-capture.h"
-#include "sourceview/ide-source-view-mode.h"
-#include "sourceview/ide-source-view-movements.h"
-#include "sourceview/ide-source-view-private.h"
-#include "sourceview/ide-source-view.h"
-#include "sourceview/ide-text-util.h"
-#include "sourceview/ide-word-completion-provider.h"
-#include "symbols/ide-symbol.h"
-#include "symbols/ide-symbol-resolver.h"
-#include "util/ide-gtk.h"
-#include "vcs/ide-vcs.h"
-#include "workbench/ide-workbench-private.h"
+#include "ide-completion-private.h"
+#include "ide-completion.h"
+#include "ide-cursor.h"
+#include "ide-hover-private.h"
+#include "ide-indenter.h"
+#include "ide-snippet-chunk.h"
+#include "ide-snippet-context.h"
+#include "ide-snippet-private.h"
+#include "ide-snippet.h"
+#include "ide-source-view-capture.h"
+#include "ide-source-view-mode.h"
+#include "ide-source-view-movements.h"
+#include "ide-source-view-private.h"
+#include "ide-source-view.h"
+#include "ide-source-view-enums.h"
+#include "ide-text-util.h"
 
 #define INCLUDE_STATEMENTS "^#include[\\s]+[\\\"\\<][^\\s\\\"\\\'\\<\\>[:cntrl:]]+[\\\"\\>]"
 
@@ -106,15 +91,12 @@ typedef struct
   GtkTextMark                 *scroll_mark;
   GQueue                      *selections;
   GQueue                      *snippets;
-  GtkSourceCompletionProvider *snippets_provider;
   DzlAnimation                *hadj_animation;
   DzlAnimation                *vadj_animation;
-  IdeOmniGutterRenderer       *omni_renderer;
+  IdeGutter                   *gutter;
 
-  IdeExtensionSetAdapter      *completion_providers;
-  DzlSignalGroup              *completion_providers_signals;
-
-  IdeWordCompletionProvider   *word_completion_provider;
+  IdeCompletion               *completion;
+  IdeHover                    *hover;
 
   DzlBindingGroup             *file_setting_bindings;
   DzlSignalGroup              *buffer_signals;
@@ -148,7 +130,7 @@ typedef struct
   guint                        delay_size_allocate_chainup;
   GtkAllocation                delay_size_allocation;
 
-  IdeSourceLocation           *definition_src_location;
+  IdeLocation                 *definition_src_location;
   GtkTextMark                 *definition_highlight_start_mark;
   GtkTextMark                 *definition_highlight_end_mark;
 
@@ -156,21 +138,27 @@ typedef struct
 
   IdeCursor                   *cursor;
 
+  guint                        in_key_press;
+
   guint                        auto_indent : 1;
   guint                        completion_blocked : 1;
-  guint                        completion_visible : 1;
-  guint                        enable_word_completion : 1;
+  guint                        did_ctrl_opacity : 1;
   guint                        highlight_current_line : 1;
-  guint                        in_key_press : 1;
   guint                        in_replay_macro : 1;
   guint                        insert_mark_cleared : 1;
   guint                        insert_matching_brace : 1;
+  guint                        interactive_completion : 1;
   guint                        overwrite_braces : 1;
   guint                        recording_macro : 1;
   guint                        scrolling_to_scroll_mark : 1;
   guint                        show_grid_lines : 1;
   guint                        snippet_completion : 1;
   guint                        waiting_for_capture : 1;
+  guint                        waiting_for_symbol : 1;
+  guint                        show_line_changes : 1;
+  guint                        show_line_diagnostics : 1;
+  guint                        show_line_numbers : 1;
+  guint                        show_relative_line_numbers : 1;
 } IdeSourceViewPrivate;
 
 typedef struct
@@ -183,7 +171,7 @@ typedef struct
 typedef struct
 {
   GPtrArray         *resolvers;
-  IdeSourceLocation *location;
+  IdeLocation *location;
 } FindReferencesTaskData;
 
 G_DEFINE_TYPE_WITH_PRIVATE (IdeSourceView, ide_source_view, GTK_SOURCE_TYPE_VIEW)
@@ -191,21 +179,22 @@ DZL_DEFINE_COUNTER (instances, "IdeSourceView", "Instances", "Number of IdeSourc
 
 enum {
   PROP_0,
+  PROP_COMPLETION_N_ROWS,
   PROP_COUNT,
-  PROP_ENABLE_WORD_COMPLETION,
   PROP_FILE_SETTINGS,
   PROP_FONT_NAME,
   PROP_FONT_DESC,
   PROP_INDENTER,
   PROP_INDENT_STYLE,
   PROP_INSERT_MATCHING_BRACE,
+  PROP_INTERACTIVE_COMPLETION,
   PROP_MODE_DISPLAY_NAME,
   PROP_OVERWRITE_BRACES,
   PROP_SCROLL_OFFSET,
   PROP_SHOW_GRID_LINES,
   PROP_SHOW_LINE_CHANGES,
   PROP_SHOW_LINE_DIAGNOSTICS,
-  PROP_SNIPPET_COMPLETION,
+  PROP_SHOW_RELATIVE_LINE_NUMBERS,
   PROP_OVERSCROLL,
   LAST_PROP,
 
@@ -224,15 +213,14 @@ enum {
   BEGIN_MACRO,
   BEGIN_RENAME,
   BEGIN_USER_ACTION,
-  BEGIN_WORD_COMPLETION,
   CAPTURE_MODIFIER,
   CLEAR_COUNT,
   CLEAR_MODIFIER,
   CLEAR_SEARCH,
   CLEAR_SELECTION,
   CLEAR_SNIPPETS,
+  COPY_CLIPBOARD_EXTENDED,
   CYCLE_COMPLETION,
-  DOCUMENTATION_REQUESTED,
   DECREASE_FONT_SIZE,
   DELETE_SELECTION,
   DRAW_BUBBLES,
@@ -299,38 +287,82 @@ static gdouble     fontScale [LAST_FONT_SCALE] = {
   1.2, 1.44, 1.728, 2.48832,
 };
 
-static void ide_source_view_real_save_insert_mark    (IdeSourceView         *self);
-static void ide_source_view_real_restore_insert_mark (IdeSourceView         *self);
-static void ide_source_view_real_set_mode            (IdeSourceView         *self,
-                                                      const gchar           *name,
-                                                      IdeSourceViewModeType  type);
-static void ide_source_view_save_column              (IdeSourceView         *self);
-static void ide_source_view_maybe_overwrite          (IdeSourceView         *self,
-                                                      GtkTextIter           *iter,
-                                                      const gchar           *text,
-                                                      gint                   len);
+static gboolean ide_source_view_do_size_allocate_hack_cb (gpointer               data);
+static void     ide_source_view_real_save_insert_mark    (IdeSourceView         *self);
+static void     ide_source_view_real_restore_insert_mark (IdeSourceView         *self);
+static void     ide_source_view_real_set_mode            (IdeSourceView         *self,
+                                                          const gchar           *name,
+                                                          IdeSourceViewModeType  type);
+static void     ide_source_view_save_column              (IdeSourceView         *self);
+static void     ide_source_view_maybe_overwrite          (IdeSourceView         *self,
+                                                          GtkTextIter           *iter,
+                                                          const gchar           *text,
+                                                          gint                   len);
+
+static gpointer
+get_selection_owner (IdeSourceView *self)
+{
+  return g_object_get_data (G_OBJECT (gtk_widget_get_toplevel (GTK_WIDGET (self))),
+                            "IDE_SOURCE_VIEW_SELECTION_OWNER");
+}
+
+static void
+set_selection_owner (IdeSourceView *self,
+                     gpointer       tag)
+{
+  g_object_set_data (G_OBJECT (gtk_widget_get_toplevel (GTK_WIDGET (self))),
+                     "IDE_SOURCE_VIEW_SELECTION_OWNER", tag);
+}
 
 static void
 find_references_task_data_free (FindReferencesTaskData *data)
 {
   g_clear_pointer (&data->resolvers, g_ptr_array_unref);
-  g_clear_pointer (&data->location, ide_source_location_unref);
+  g_clear_object (&data->location);
   g_slice_free (FindReferencesTaskData, data);
 }
 
 static void
-find_references_task_get_extension (IdeExtensionSetAdapter *set,
-                                    PeasPluginInfo         *plugin_info,
-                                    PeasExtension          *extension,
-                                    gpointer                user_data)
+block_interactive (IdeSourceView *self)
 {
-  FindReferencesTaskData *data = user_data;
-  IdeSymbolResolver *resolver = (IdeSymbolResolver *)extension;
+  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
 
-  g_assert (data != NULL);
-  g_assert (IDE_IS_SYMBOL_RESOLVER (resolver));
+  g_assert (IDE_IS_SOURCE_VIEW (self));
 
-  g_ptr_array_add (data->resolvers, g_object_ref (resolver));
+  if (priv->completion)
+    ide_completion_block_interactive (priv->completion);
+}
+
+static void
+unblock_interactive (IdeSourceView *self)
+{
+  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
+
+  g_assert (IDE_IS_SOURCE_VIEW (self));
+
+  if (priv->completion != NULL)
+    ide_completion_unblock_interactive (priv->completion);
+}
+
+static void
+ide_source_view_set_interactive_completion (IdeSourceView *self,
+                                            gboolean       interactive_completion)
+{
+  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
+
+  g_return_if_fail (IDE_IS_SOURCE_VIEW (self));
+
+  interactive_completion = !!interactive_completion;
+
+  if (interactive_completion != priv->interactive_completion)
+    {
+      priv->interactive_completion = interactive_completion;
+
+      if (interactive_completion)
+        unblock_interactive (self);
+      else
+        block_interactive (self);
+    }
 }
 
 static void
@@ -636,7 +668,7 @@ ide_source_view_scroll_to_insert (IdeSourceView *self)
   buffer = gtk_text_view_get_buffer (GTK_TEXT_VIEW (self));
   _ide_buffer_cancel_cursor_restore (IDE_BUFFER (buffer));
   mark = gtk_text_buffer_get_insert (buffer);
-  ide_source_view_scroll_mark_onscreen (self, mark, TRUE, 0.5, 0.5);
+  ide_source_view_scroll_mark_onscreen (self, mark, TRUE, 0.5, 1.0);
 
   IDE_EXIT;
 }
@@ -695,61 +727,6 @@ text_iter_get_line_prefix (const GtkTextIter *iter)
 }
 
 static void
-ide_source_view_reload_word_completion (IdeSourceView *self)
-{
-  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  IdeContext *context;
-
-  g_assert (IDE_IS_SOURCE_VIEW (self));
-
-  if ((priv->buffer != NULL) && (context = ide_buffer_get_context (priv->buffer)))
-    {
-      IdeBufferManager *bufmgr;
-      GtkSourceCompletion *completion;
-      GtkSourceCompletionWords *words;
-      GList *list;
-
-      bufmgr = ide_context_get_buffer_manager (context);
-      words = ide_buffer_manager_get_word_completion (bufmgr);
-      completion = gtk_source_view_get_completion (GTK_SOURCE_VIEW (self));
-      list = gtk_source_completion_get_providers (completion);
-
-      if (priv->enable_word_completion && !g_list_find (list, words))
-        gtk_source_completion_add_provider (completion,
-                                            GTK_SOURCE_COMPLETION_PROVIDER (words),
-                                            NULL);
-      else if (!priv->enable_word_completion && g_list_find (list, words))
-        gtk_source_completion_remove_provider (completion,
-                                               GTK_SOURCE_COMPLETION_PROVIDER (words),
-                                               NULL);
-    }
-}
-
-static void
-ide_source_view_reload_snippets (IdeSourceView *self)
-{
-  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  IdeSourceSnippets *snippets = NULL;
-  IdeContext *context = NULL;
-
-  g_assert (IDE_IS_SOURCE_VIEW (self));
-
-  if ((priv->buffer != NULL) && (context = ide_buffer_get_context (priv->buffer)))
-    {
-      IdeSourceSnippetsManager *manager;
-      GtkSourceLanguage *source_language;
-
-      manager = ide_context_get_snippets_manager (context);
-      source_language = gtk_source_buffer_get_language (GTK_SOURCE_BUFFER (priv->buffer));
-      if (source_language != NULL)
-        snippets = ide_source_snippets_manager_get_for_language (manager, source_language);
-    }
-
-  if (priv->snippets_provider != NULL)
-    g_object_set (priv->snippets_provider, "snippets", snippets, NULL);
-}
-
-static void
 ide_source_view_update_auto_indent_override (IdeSourceView *self)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
@@ -790,7 +767,7 @@ ide_source_view_set_file_settings (IdeSourceView   *self,
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
-  g_assert (IDE_IS_FILE_SETTINGS (file_settings));
+  g_assert (!file_settings || IDE_IS_FILE_SETTINGS (file_settings));
 
   if (file_settings != ide_source_view_get_file_settings (self))
     {
@@ -800,81 +777,14 @@ ide_source_view_set_file_settings (IdeSourceView   *self,
 }
 
 static void
-ide_source_view__file_load_settings_cb (GObject      *object,
-                                        GAsyncResult *result,
-                                        gpointer      user_data)
-{
-  g_autoptr(IdeSourceView) self = user_data;
-  g_autoptr(IdeFileSettings) file_settings = NULL;
-  g_autoptr(GError) error = NULL;
-  IdeFile *file = (IdeFile *)object;
-
-  g_assert (IDE_IS_FILE (file));
-  g_assert (IDE_IS_SOURCE_VIEW (self));
-
-  file_settings = ide_file_load_settings_finish (file, result, &error);
-
-  if (!file_settings)
-    {
-      g_message ("%s", error->message);
-      return;
-    }
-
-  ide_source_view_set_file_settings (self, file_settings);
-}
-
-static void
-ide_source_view_reload_file_settings (IdeSourceView *self)
-{
-  IdeBuffer *buffer;
-  IdeFile *file;
-
-  g_assert (IDE_IS_SOURCE_VIEW (self));
-  g_assert (IDE_IS_BUFFER (gtk_text_view_get_buffer (GTK_TEXT_VIEW (self))));
-
-  buffer = IDE_BUFFER (gtk_text_view_get_buffer (GTK_TEXT_VIEW (self)));
-  file = ide_buffer_get_file (buffer);
-
-  ide_file_load_settings_async (file,
-                                NULL,
-                                ide_source_view__file_load_settings_cb,
-                                g_object_ref (self));
-}
-
-static void
-ide_source_view_reload_language (IdeSourceView *self)
-{
-  GtkSourceLanguage *language;
-  GtkTextBuffer *buffer;
-  IdeFile *file = NULL;
-
-  g_assert (IDE_IS_SOURCE_VIEW (self));
-
-  /*
-   * Update source language, etc.
-   */
-  buffer = gtk_text_view_get_buffer (GTK_TEXT_VIEW (self));
-  file = ide_buffer_get_file (IDE_BUFFER (buffer));
-  language = ide_file_get_language (file);
-
-  g_assert (IDE_IS_BUFFER (buffer));
-  g_assert (IDE_IS_FILE (file));
-  g_assert (!language || GTK_SOURCE_IS_LANGUAGE (language));
-
-  gtk_source_buffer_set_language (GTK_SOURCE_BUFFER (buffer), language);
-}
-
-static void
-ide_source_view__buffer_notify_file_cb (IdeSourceView *self,
-                                        GParamSpec    *pspec,
-                                        IdeBuffer     *buffer)
+ide_source_view__buffer_notify_file_settings_cb (IdeSourceView *self,
+                                                 GParamSpec    *pspec,
+                                                 IdeBuffer     *buffer)
 {
   g_assert (IDE_IS_SOURCE_VIEW (self));
   g_assert (IDE_IS_BUFFER (buffer));
 
-  ide_source_view_reload_language (self);
-  ide_source_view_reload_file_settings (self);
-  ide_source_view_reload_snippets (self);
+  ide_source_view_set_file_settings (self, ide_buffer_get_file_settings (buffer));
 }
 
 static void
@@ -883,33 +793,22 @@ ide_source_view__buffer_notify_language_cb (IdeSourceView *self,
                                             IdeBuffer     *buffer)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  GtkSourceLanguage *language;
-  const gchar *lang_id = NULL;
+  const gchar *lang_id;
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
   g_assert (IDE_IS_BUFFER (buffer));
 
-  if ((language = gtk_source_buffer_get_language (GTK_SOURCE_BUFFER (buffer))))
-    lang_id = gtk_source_language_get_id (language);
+  lang_id = ide_buffer_get_language_id (buffer);
 
-  /*
-   * Update the indenter, which is provided by a plugin.
-   */
+  /* Update the indenter, which is provided by a plugin. */
   if (priv->indenter_adapter != NULL)
     ide_extension_adapter_set_value (priv->indenter_adapter, lang_id);
   ide_source_view_update_auto_indent_override (self);
+
+  /* Reload hover providers by language */
+  _ide_hover_set_language (priv->hover, lang_id);
+
   g_object_notify_by_pspec (G_OBJECT (self), properties [PROP_INDENTER]);
-
-  /*
-   * Update the completion providers, which are provided by plugins.
-   */
-  if (priv->completion_providers != NULL)
-    ide_extension_set_adapter_set_value (priv->completion_providers, lang_id);
-
-  /*
-   * Make sure the snippet engine reloads for the new language.
-   */
-  ide_source_view_reload_snippets (self);
 }
 
 static void
@@ -938,6 +837,20 @@ ide_source_view__buffer_notify_style_scheme_cb (IdeSourceView *self,
       gdk_rgba_parse (&priv->snippet_area_background_rgba, "#204a87");
       priv->snippet_area_background_rgba.alpha = 0.1;
     }
+}
+
+static void
+ide_source_view__buffer_request_scroll_to_insert_cb (IdeSourceView *self,
+                                                     IdeBuffer     *buffer)
+{
+  GtkTextMark *mark;
+
+  g_assert (IDE_IS_MAIN_THREAD ());
+  g_assert (IDE_IS_SOURCE_VIEW (self));
+  g_assert (IDE_IS_BUFFER (buffer));
+
+  mark = gtk_text_buffer_get_insert (GTK_TEXT_BUFFER (buffer));
+  gtk_text_view_scroll_mark_onscreen (GTK_TEXT_VIEW (self), mark);
 }
 
 static void
@@ -984,8 +897,11 @@ ide_source_view_rebuild_css (IdeSourceView *self)
       css = g_strdup_printf ("textview { %s }", str ?: "");
       gtk_css_provider_load_from_data (priv->css_provider, css, -1, NULL);
 
-      if (priv->omni_renderer != NULL)
-        _ide_omni_gutter_renderer_reset_font (priv->omni_renderer);
+      if (priv->gutter != NULL)
+        ide_gutter_style_changed (priv->gutter);
+
+      if (priv->completion != NULL)
+        _ide_completion_set_font_description (priv->completion, font_desc);
 
       g_clear_pointer (&copy, pango_font_description_free);
     }
@@ -1023,14 +939,14 @@ ide_source_view__buffer_insert_text_cb (IdeSourceView *self,
                                         GtkTextBuffer *buffer)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  IdeSourceSnippet *snippet;
+  IdeSnippet *snippet;
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
   g_assert (iter != NULL);
   g_assert (text != NULL);
   g_assert (IDE_IS_BUFFER (buffer));
 
-  if (_ide_buffer_get_loading (IDE_BUFFER (buffer)))
+  if (ide_buffer_get_loading (IDE_BUFFER (buffer)))
     return;
 
   gtk_text_buffer_begin_user_action (buffer);
@@ -1038,7 +954,7 @@ ide_source_view__buffer_insert_text_cb (IdeSourceView *self,
   if (NULL != (snippet = g_queue_peek_head (priv->snippets)))
     {
       ide_source_view_block_handlers (self);
-      ide_source_snippet_before_insert_text (snippet, buffer, iter, text, len);
+      ide_snippet_before_insert_text (snippet, buffer, iter, text, len);
       ide_source_view_unblock_handlers (self);
     }
 }
@@ -1051,7 +967,7 @@ ide_source_view__buffer_insert_text_after_cb (IdeSourceView *self,
                                               GtkTextBuffer *buffer)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  IdeSourceSnippet *snippet;
+  IdeSnippet *snippet;
   GtkTextIter insert;
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
@@ -1059,7 +975,7 @@ ide_source_view__buffer_insert_text_after_cb (IdeSourceView *self,
   g_assert (text != NULL);
   g_assert (IDE_IS_BUFFER (buffer));
 
-  if (_ide_buffer_get_loading (IDE_BUFFER (buffer)))
+  if (ide_buffer_get_loading (IDE_BUFFER (buffer)))
     return;
 
   if (NULL != (snippet = g_queue_peek_head (priv->snippets)))
@@ -1068,11 +984,11 @@ ide_source_view__buffer_insert_text_after_cb (IdeSourceView *self,
       GtkTextMark *end;
 
       ide_source_view_block_handlers (self);
-      ide_source_snippet_after_insert_text (snippet, buffer, iter, text, len);
+      ide_snippet_after_insert_text (snippet, buffer, iter, text, len);
       ide_source_view_unblock_handlers (self);
 
-      begin = ide_source_snippet_get_mark_begin (snippet);
-      end = ide_source_snippet_get_mark_end (snippet);
+      begin = ide_snippet_get_mark_begin (snippet);
+      end = ide_snippet_get_mark_end (snippet);
       ide_source_view_invalidate_range_mark (self, begin, end);
     }
 
@@ -1087,18 +1003,21 @@ ide_source_view__buffer_insert_text_after_cb (IdeSourceView *self,
       ide_source_view_maybe_overwrite (self, iter, text, len);
     }
 
-  gtk_text_buffer_get_iter_at_mark (buffer, &insert, gtk_text_buffer_get_insert(buffer));
-  if (gtk_text_iter_equal (iter, &insert))
+  /* Ignore multiple cursors unless we have focus */
+  if (gtk_widget_has_focus (GTK_WIDGET (self)))
     {
-      ide_source_view_block_handlers (self);
-      ide_cursor_insert_text (priv->cursor, text, len);
-      ide_source_view_unblock_handlers (self);
-      gtk_text_buffer_get_iter_at_mark (buffer, iter, gtk_text_buffer_get_insert (buffer));
+      gtk_text_buffer_get_iter_at_mark (buffer, &insert, gtk_text_buffer_get_insert(buffer));
+
+      if (gtk_text_iter_equal (iter, &insert))
+        {
+          ide_source_view_block_handlers (self);
+          ide_cursor_insert_text (priv->cursor, text, len);
+          ide_source_view_unblock_handlers (self);
+          gtk_text_buffer_get_iter_at_mark (buffer, iter, gtk_text_buffer_get_insert (buffer));
+        }
     }
 
   gtk_text_buffer_end_user_action (buffer);
-
-  return;
 }
 
 static void
@@ -1108,7 +1027,7 @@ ide_source_view__buffer_delete_range_cb (IdeSourceView *self,
                                          GtkTextBuffer *buffer)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  IdeSourceSnippet *snippet;
+  IdeSnippet *snippet;
 
   IDE_ENTRY;
 
@@ -1121,11 +1040,11 @@ ide_source_view__buffer_delete_range_cb (IdeSourceView *self,
       GtkTextMark *end_mark;
 
       ide_source_view_block_handlers (self);
-      ide_source_snippet_before_delete_range (snippet, buffer, begin, end);
+      ide_snippet_before_delete_range (snippet, buffer, begin, end);
       ide_source_view_unblock_handlers (self);
 
-      begin_mark = ide_source_snippet_get_mark_begin (snippet);
-      end_mark = ide_source_snippet_get_mark_end (snippet);
+      begin_mark = ide_snippet_get_mark_begin (snippet);
+      end_mark = ide_snippet_get_mark_end (snippet);
       ide_source_view_invalidate_range_mark (self, begin_mark, end_mark);
     }
 
@@ -1139,7 +1058,7 @@ ide_source_view__buffer_delete_range_after_cb (IdeSourceView *self,
                                                GtkTextBuffer *buffer)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  IdeSourceSnippet *snippet;
+  IdeSnippet *snippet;
 
   IDE_ENTRY;
 
@@ -1149,7 +1068,7 @@ ide_source_view__buffer_delete_range_after_cb (IdeSourceView *self,
   ide_source_view_block_handlers (self);
 
   if (NULL != (snippet = g_queue_peek_head (priv->snippets)))
-    ide_source_snippet_after_delete_range (snippet, buffer, begin, end);
+    ide_snippet_after_delete_range (snippet, buffer, begin, end);
 
   ide_source_view_unblock_handlers (self);
 
@@ -1163,7 +1082,7 @@ ide_source_view__buffer_mark_set_cb (IdeSourceView *self,
                                      GtkTextBuffer *buffer)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  IdeSourceSnippet *snippet;
+  IdeSnippet *snippet;
   GtkTextMark *insert;
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
@@ -1177,7 +1096,7 @@ ide_source_view__buffer_mark_set_cb (IdeSourceView *self,
     {
       ide_source_view_block_handlers (self);
       while (NULL != (snippet = g_queue_peek_head (priv->snippets)) &&
-             !ide_source_snippet_insert_set (snippet, mark))
+             !ide_snippet_insert_set (snippet, mark))
         ide_source_view_pop_snippet (self);
       ide_source_view_unblock_handlers (self);
     }
@@ -1206,28 +1125,31 @@ ide_source_view__buffer_notify_has_selection_cb (IdeSourceView *self,
                                                  GParamSpec    *pspec,
                                                  IdeBuffer     *buffer)
 {
-  IdeWorkbench *workbench = ide_widget_get_workbench (GTK_WIDGET (self));
+  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
+  gboolean has_selection;
 
-  if (workbench == NULL)
-    return;
+  has_selection = gtk_text_buffer_get_has_selection (GTK_TEXT_BUFFER (buffer));
+  ide_source_view_mode_set_has_selection (priv->mode, has_selection);
 
-  if (gtk_text_buffer_get_has_selection (GTK_TEXT_BUFFER (buffer)))
-    ide_workbench_set_selection_owner (workbench, G_OBJECT (self));
-  else if (ide_workbench_get_selection_owner (workbench) == G_OBJECT (self))
-    ide_workbench_set_selection_owner (workbench, NULL);
+  if (has_selection)
+    set_selection_owner (self, G_OBJECT (self));
+  else if (get_selection_owner (self) == G_OBJECT (self))
+    set_selection_owner (self, NULL);
 }
 
 static void
 ide_source_view__buffer_line_flags_changed_cb (IdeSourceView *self,
                                                IdeBuffer     *buffer)
 {
+  GtkSourceGutter *gutter;
+
   IDE_ENTRY;
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
   g_assert (IDE_IS_BUFFER (buffer));
 
-  gtk_source_gutter_queue_draw (gtk_source_view_get_gutter (GTK_SOURCE_VIEW (self),
-                                                            GTK_TEXT_WINDOW_LEFT));
+  gutter = gtk_source_view_get_gutter (GTK_SOURCE_VIEW (self), GTK_TEXT_WINDOW_LEFT);
+  gtk_source_gutter_queue_draw (gutter);
 
   IDE_EXIT;
 }
@@ -1237,7 +1159,6 @@ ide_source_view__buffer_loaded_cb (IdeSourceView *self,
                                    IdeBuffer     *buffer)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  GtkAdjustment *adj;
   GtkTextMark *insert;
   GtkTextIter iter;
 
@@ -1248,70 +1169,16 @@ ide_source_view__buffer_loaded_cb (IdeSourceView *self,
 
   if (priv->completion_blocked)
     {
-      GtkSourceCompletion *completion;
-
-      completion = gtk_source_view_get_completion (GTK_SOURCE_VIEW (self));
-      gtk_source_completion_unblock_interactive (completion);
+      unblock_interactive (self);
       priv->completion_blocked = FALSE;
     }
 
-  insert = gtk_text_buffer_get_insert (GTK_TEXT_BUFFER (buffer));
-
   /* Store the line column (visual offset) so movements are correct. */
+  insert = gtk_text_buffer_get_insert (GTK_TEXT_BUFFER (buffer));
   gtk_text_buffer_get_iter_at_mark (GTK_TEXT_BUFFER (buffer), &iter, insert);
-  priv->target_line_column = gtk_source_view_get_visual_column (GTK_SOURCE_VIEW (self),
-                                                                &iter);
-
-  /* Only scroll if the user hasn't started an intermediate scroll */
-  adj = gtk_scrollable_get_vadjustment (GTK_SCROLLABLE (self));
-  if (gtk_adjustment_get_value (adj) == gtk_adjustment_get_lower (adj))
-    ide_source_view_scroll_to_mark (self, insert, 0.0, TRUE, 0.5, 0.5, TRUE);
+  priv->target_line_column = gtk_source_view_get_visual_column (GTK_SOURCE_VIEW (self), &iter);
 
   IDE_EXIT;
-}
-
-static void
-ide_source_view__completion_provider_added (IdeExtensionSetAdapter *adapter,
-                                            PeasPluginInfo         *plugin_info,
-                                            PeasExtension          *extension,
-                                            IdeSourceView          *self)
-{
-  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  GtkSourceCompletion *completion;
-
-  g_assert (IDE_IS_SOURCE_VIEW (self));
-  g_assert (plugin_info != NULL);
-  g_assert (IDE_IS_COMPLETION_PROVIDER (extension));
-  g_assert (IDE_IS_EXTENSION_SET_ADAPTER (adapter));
-
-  completion = gtk_source_view_get_completion (GTK_SOURCE_VIEW (self));
-
-  gtk_source_completion_add_provider (completion,
-                                      GTK_SOURCE_COMPLETION_PROVIDER (extension),
-                                      NULL);
-
-  ide_completion_provider_load (IDE_COMPLETION_PROVIDER (extension),
-                                ide_buffer_get_context (priv->buffer));
-}
-
-static void
-ide_source_view__completion_provider_removed (IdeExtensionSetAdapter *adapter,
-                                              PeasPluginInfo         *plugin_info,
-                                              PeasExtension          *extension,
-                                              IdeSourceView          *self)
-{
-  GtkSourceCompletion *completion;
-
-  g_assert (IDE_IS_SOURCE_VIEW (self));
-  g_assert (plugin_info != NULL);
-  g_assert (IDE_IS_COMPLETION_PROVIDER (extension));
-  g_assert (IDE_IS_EXTENSION_SET_ADAPTER (adapter));
-
-  completion = gtk_source_view_get_completion (GTK_SOURCE_VIEW (self));
-
-  gtk_source_completion_remove_provider (completion,
-                                         GTK_SOURCE_COMPLETION_PROVIDER (extension),
-                                         NULL);
 }
 
 static void
@@ -1340,7 +1207,7 @@ ide_source_view_reset_definition_highlight (IdeSourceView *self)
   g_assert (IDE_IS_SOURCE_VIEW (self));
 
   if (priv->definition_src_location)
-    g_clear_pointer (&priv->definition_src_location, ide_source_location_unref);
+    g_clear_object (&priv->definition_src_location);
 
   if (priv->buffer != NULL)
     {
@@ -1398,12 +1265,14 @@ ide_source_view_bind_buffer (IdeSourceView  *self,
                              DzlSignalGroup *group)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
+  g_autoptr(IdeContext) context = NULL;
   GtkTextMark *insert;
+  IdeObjectBox *box;
   GtkTextIter iter;
-  IdeContext *context;
 
   IDE_ENTRY;
 
+  g_assert (IDE_IS_MAIN_THREAD ());
   g_assert (IDE_IS_SOURCE_VIEW (self));
   g_assert (IDE_IS_BUFFER (buffer));
   g_assert (DZL_IS_SIGNAL_GROUP (group));
@@ -1414,35 +1283,23 @@ ide_source_view_bind_buffer (IdeSourceView  *self,
 
   ide_buffer_hold (buffer);
 
-  if (_ide_buffer_get_loading (buffer))
+  if (ide_buffer_get_loading (buffer))
     {
-      GtkSourceCompletion *completion;
-
-      completion = gtk_source_view_get_completion (GTK_SOURCE_VIEW (self));
-      gtk_source_completion_block_interactive (completion);
+      block_interactive (self);
       priv->completion_blocked = TRUE;
     }
 
-  context = ide_buffer_get_context (buffer);
+  context = ide_buffer_ref_context (buffer);
 
-  priv->indenter_adapter = ide_extension_adapter_new (context,
+  _ide_hover_set_context (priv->hover, context);
+
+  box = ide_object_box_from_object (G_OBJECT (buffer));
+
+  priv->indenter_adapter = ide_extension_adapter_new (IDE_OBJECT (box),
                                                       peas_engine_get_default (),
                                                       IDE_TYPE_INDENTER,
                                                       "Indenter-Languages",
                                                       NULL);
-
-  priv->completion_providers = ide_extension_set_adapter_new (context,
-                                                              peas_engine_get_default (),
-                                                              IDE_TYPE_COMPLETION_PROVIDER,
-                                                              "Completion-Provider-Languages",
-                                                              NULL);
-
-  dzl_signal_group_set_target (priv->completion_providers_signals,
-                               priv->completion_providers);
-
-  ide_extension_set_adapter_foreach (priv->completion_providers,
-                                     (IdeExtensionSetAdapterForeachFunc)ide_source_view__completion_provider_added,
-                                     self);
 
   priv->cursor = g_object_new (IDE_TYPE_CURSOR,
                                "ide-source-view", self,
@@ -1462,11 +1319,10 @@ ide_source_view_bind_buffer (IdeSourceView  *self,
   g_object_ref (priv->definition_highlight_end_mark);
 
   ide_source_view__buffer_notify_language_cb (self, NULL, buffer);
-  ide_source_view__buffer_notify_file_cb (self, NULL, buffer);
+  ide_source_view__buffer_notify_file_settings_cb (self, NULL, buffer);
   ide_source_view__buffer_notify_style_scheme_cb (self, NULL, buffer);
   ide_source_view__buffer__notify_can_redo (self, NULL, buffer);
   ide_source_view__buffer__notify_can_undo (self, NULL, buffer);
-  ide_source_view_reload_word_completion (self);
   ide_source_view_real_set_mode (self, NULL, IDE_SOURCE_VIEW_MODE_TYPE_PERMANENT);
 
   insert = gtk_text_buffer_get_insert (GTK_TEXT_BUFFER (buffer));
@@ -1493,18 +1349,9 @@ ide_source_view_unbind_buffer (IdeSourceView  *self,
 
   if (priv->completion_blocked)
     {
-      GtkSourceCompletion *completion;
-
-      completion = gtk_source_view_get_completion (GTK_SOURCE_VIEW (self));
-      gtk_source_completion_unblock_interactive (completion);
+      unblock_interactive (self);
       priv->completion_blocked = FALSE;
     }
-
-  ide_extension_set_adapter_foreach (priv->completion_providers,
-                                     (IdeExtensionSetAdapterForeachFunc)ide_source_view__completion_provider_removed,
-                                     self);
-
-  dzl_signal_group_set_target (priv->completion_providers_signals, NULL);
 
   if (priv->cursor != NULL)
     {
@@ -1512,14 +1359,72 @@ ide_source_view_unbind_buffer (IdeSourceView  *self,
       g_clear_object (&priv->cursor);
     }
 
-  g_clear_object (&priv->indenter_adapter);
-  g_clear_object (&priv->completion_providers);
+  ide_clear_and_destroy_object (&priv->indenter_adapter);
   g_clear_object (&priv->definition_highlight_start_mark);
   g_clear_object (&priv->definition_highlight_end_mark);
 
   ide_buffer_release (priv->buffer);
 
   IDE_EXIT;
+}
+
+static gboolean
+is_opening_char (gunichar ch)
+{
+  switch (ch)
+    {
+    case '{':
+    case '(':
+    case '"':
+    case '\'':
+    case '[':
+      return TRUE;
+
+    default:
+      return FALSE;
+    }
+}
+
+static guint
+count_chars_on_line (IdeSourceView      *view,
+                     gunichar           expected_char,
+                     const GtkTextIter *iter)
+{
+  GtkTextIter cur;
+  guint count = 0;
+
+  g_return_val_if_fail (IDE_IS_SOURCE_VIEW (view), 0);
+  g_return_val_if_fail (iter, 0);
+
+  cur = *iter;
+
+  gtk_text_iter_set_line_offset (&cur, 0);
+
+  while (!gtk_text_iter_ends_line (&cur))
+    {
+      gunichar ch;
+
+      ch = gtk_text_iter_get_char (&cur);
+
+      if (ch == '\\')
+        {
+          gtk_text_iter_forward_chars (&cur, 2);
+          continue;
+        }
+
+      count += (ch == expected_char);
+      gtk_text_iter_forward_char (&cur);
+    }
+
+  return count;
+}
+
+static gboolean
+is_xmlish (const gchar *lang_id)
+{
+  return (g_strcmp0 (lang_id, "xml") == 0) ||
+         (g_strcmp0 (lang_id, "html") == 0);
+
 }
 
 static void
@@ -1534,6 +1439,9 @@ ide_source_view_maybe_overwrite (IdeSourceView *self,
   GtkTextIter next;
   gunichar ch;
   gunichar next_ch;
+  gunichar match;
+  guint count_open;
+  guint count_close;
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
   g_assert (iter != NULL);
@@ -1586,7 +1494,25 @@ ide_source_view_maybe_overwrite (IdeSourceView *self,
     {
     case ')': case ']': case '}': case '"': case '\'': case ';':
       if (ch == next_ch)
-        break;
+        {
+          if (ch == '"')
+            break;
+
+          switch (ch)
+            {
+            case ']':  match = '[';  break;
+            case '}':  match = '{';  break;
+            case ')':  match = '(';  break;
+            case '\'': match = '\''; break;
+            case '>':  match = '<';  break;
+            default:   match = 0;    break;
+            }
+
+          count_open = count_chars_on_line (self, match, iter);
+          count_close = count_chars_on_line (self, ch, iter);
+          if (count_close != count_open)
+            break;
+        }
       /* fall through */
     default:
       return;
@@ -1600,57 +1526,6 @@ ide_source_view_maybe_overwrite (IdeSourceView *self,
 }
 
 static gboolean
-is_closing_char (gunichar ch)
-{
-  switch (ch)
-    {
-    case '}':
-    case ')':
-    case '"':
-    case '\'':
-    case ']':
-      return TRUE;
-
-    default:
-      return FALSE;
-    }
-}
-
-static guint
-count_chars_on_line (IdeSourceView      *view,
-                     gunichar           expected_char,
-                     const GtkTextIter *iter)
-{
-  GtkTextIter cur;
-  guint count = 0;
-
-  g_return_val_if_fail (IDE_IS_SOURCE_VIEW (view), 0);
-  g_return_val_if_fail (iter, 0);
-
-  cur = *iter;
-
-  gtk_text_iter_set_line_offset (&cur, 0);
-
-  while (!gtk_text_iter_ends_line (&cur))
-    {
-      gunichar ch;
-
-      ch = gtk_text_iter_get_char (&cur);
-
-      if (ch == '\\')
-        {
-          gtk_text_iter_forward_chars (&cur, 2);
-          continue;
-        }
-
-      count += (ch == expected_char);
-      gtk_text_iter_forward_char (&cur);
-    }
-
-  return count;
-}
-
-static gboolean
 ide_source_view_maybe_insert_match (IdeSourceView *self,
                                     GdkEventKey   *event)
 {
@@ -1658,9 +1533,9 @@ ide_source_view_maybe_insert_match (IdeSourceView *self,
   GtkSourceBuffer *sbuf;
   GtkTextBuffer *buffer;
   GtkTextMark *insert;
+  const gchar *lang_id;
   GtkTextIter iter;
   GtkTextIter prev_iter;
-  GtkTextIter next_iter;
   gunichar next_ch = 0;
   gchar ch[2] = { 0 };
 
@@ -1672,6 +1547,9 @@ ide_source_view_maybe_insert_match (IdeSourceView *self,
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
   g_assert (event);
+
+  if (priv->cursor != NULL && ide_cursor_is_enabled (priv->cursor))
+    return FALSE;
 
   /*
    * If we are disabled, then do nothing.
@@ -1715,6 +1593,12 @@ ide_source_view_maybe_insert_match (IdeSourceView *self,
       ch[0] = '"';
       break;
 
+    case GDK_KEY_less:
+      if (!(lang_id = ide_buffer_get_language_id (IDE_BUFFER (buffer))) || !is_xmlish (lang_id))
+        return FALSE;
+      ch[0] = '>';
+      break;
+
 #if 0
     /*
      * TODO: We should avoid this when we are in comments, etc. That will
@@ -1735,16 +1619,13 @@ ide_source_view_maybe_insert_match (IdeSourceView *self,
    *
    *  - We are at EOF
    *  - The next character is whitespace
-   *  - The next character is a closing brace.
+   *  - The next character is punctuation
+   *  - The next character is not a opening brace.
    *  - If the char is ", then there must be an even number already on
    *    the current line.
    */
 
-  next_iter = iter;
-  if (gtk_text_iter_forward_char (&next_iter))
-    next_ch = gtk_text_iter_get_char (&next_iter);
-
-  if (!next_ch || g_unichar_isspace (next_ch) || is_closing_char (next_ch))
+  if (!next_ch || g_unichar_isspace (next_ch) || (g_unichar_ispunct (next_ch) && !is_opening_char (next_ch)))
     {
       /*
        * Special case for working with double quotes.
@@ -2125,7 +2006,7 @@ ide_source_view_key_press_event (GtkWidget   *widget,
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
   GtkTextBuffer *buffer;
   GtkTextMark *insert;
-  IdeSourceSnippet *snippet;
+  IdeSnippet *snippet;
   gboolean ret = FALSE;
   guint change_sequence;
 
@@ -2157,6 +2038,20 @@ ide_source_view_key_press_event (GtkWidget   *widget,
     }
 
   /*
+   * If we got Control alone, with no key, and the completion window is
+   * visible, then request that it make itself less visible.
+   */
+  if (event->keyval == GDK_KEY_Control_L &&
+      event->state == 0 &&
+      ide_completion_is_visible (priv->completion))
+    {
+      priv->did_ctrl_opacity = TRUE;
+      return GDK_EVENT_STOP;
+    }
+
+  priv->did_ctrl_opacity = FALSE;
+
+  /*
    * Are we currently recording a macro? If so lets stash the event for later.
    */
   if (priv->recording_macro)
@@ -2169,7 +2064,7 @@ ide_source_view_key_press_event (GtkWidget   *widget,
    */
   change_sequence = priv->change_sequence;
 
-  priv->in_key_press = TRUE;
+  priv->in_key_press++;
 
   /*
    * If we are in a non-default mode, dispatch the event to the mode. This allows custom
@@ -2201,8 +2096,10 @@ ide_source_view_key_press_event (GtkWidget   *widget,
           if ((event->state & GDK_SHIFT_MASK) == 0)
             {
               ide_source_view_block_handlers (self);
-              if (!ide_source_snippet_move_next (snippet))
+              if (!ide_snippet_move_next (snippet))
                 ide_source_view_pop_snippet (self);
+              ide_completion_cancel (priv->completion);
+              /* TODO: ask snippet if we should auto-display completion options? */
               ide_source_view_scroll_to_insert (self);
               ide_source_view_unblock_handlers (self);
               ret = TRUE;
@@ -2211,7 +2108,7 @@ ide_source_view_key_press_event (GtkWidget   *widget,
           /* Fallthrough */
         case GDK_KEY_ISO_Left_Tab:
           ide_source_view_block_handlers (self);
-          ide_source_snippet_move_previous (snippet);
+          ide_snippet_move_previous (snippet);
           ide_source_view_scroll_to_insert (self);
           ide_source_view_unblock_handlers (self);
           ret = TRUE;
@@ -2219,33 +2116,6 @@ ide_source_view_key_press_event (GtkWidget   *widget,
 
         default:
           break;
-        }
-    }
-
-  /*
-   * We have stolen ownership of Tab from GtkSourceCompletion so that we can
-   * move between snippets at a higher priority than the completion window.
-   * If we don't have a snippet active
-   */
-  if (priv->completion_visible && event->keyval == GDK_KEY_Tab)
-    {
-      GtkSourceCompletion *completion = gtk_source_view_get_completion (GTK_SOURCE_VIEW (self));
-      g_signal_emit_by_name (completion, "activate-proposal");
-      ret = TRUE;
-      goto cleanup;
-    }
-
-  /*
-   * Avoid conflicts with global <alt>+N perspective movements.
-   * We might want to adjust those keybindings at somepoint.
-   */
-  if (priv->completion_visible && event->state == GDK_MOD1_MASK)
-    {
-      if ((event->keyval >= GDK_KEY_0 && event->keyval <= GDK_KEY_9) ||
-          (event->keyval >= GDK_KEY_KP_0 && event->keyval <= GDK_KEY_KP_9))
-        {
-          ret = TRUE;
-          goto cleanup;
         }
     }
 
@@ -2267,7 +2137,9 @@ ide_source_view_key_press_event (GtkWidget   *widget,
    * chain up to the parent class to insert the character, and then let the
    * auto-indenter fix things up.
    */
-  if (priv->buffer != NULL && priv->auto_indent)
+  if (priv->buffer != NULL &&
+      priv->auto_indent &&
+      (priv->cursor == NULL || !ide_cursor_is_enabled (priv->cursor)))
     {
       IdeIndenter *indenter = ide_source_view_get_indenter (self);
 
@@ -2314,7 +2186,7 @@ ide_source_view_key_press_event (GtkWidget   *widget,
     ide_source_view_scroll_mark_onscreen (self, insert, FALSE, 0, 0);
 
 cleanup:
-  priv->in_key_press = FALSE;
+  priv->in_key_press--;
 
   return ret;
 }
@@ -2325,13 +2197,31 @@ ide_source_view_key_release_event (GtkWidget   *widget,
 {
   IdeSourceView *self = (IdeSourceView *) widget;
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  GtkWidgetClass *klass = GTK_WIDGET_CLASS (ide_source_view_parent_class);
-  gboolean ret = klass->key_release_event (widget, event);
+  gboolean ret;
+
+  g_assert (IDE_IS_SOURCE_VIEW (self));
+
+  ret = GTK_WIDGET_CLASS (ide_source_view_parent_class)->key_release_event (widget, event);
+
+  if (priv->did_ctrl_opacity)
+    {
+      IdeCompletionDisplay *display = ide_completion_get_display (priv->completion);
+
+      if (event->keyval == GDK_KEY_Control_L &&
+          event->state == GDK_CONTROL_MASK &&
+          ide_completion_is_visible (priv->completion))
+        {
+          if (gtk_widget_get_opacity (GTK_WIDGET (display)) == 1.0)
+            dzl_object_animate (display, DZL_ANIMATION_LINEAR, 250, NULL, "opacity", 0.1, NULL);
+          else
+            dzl_object_animate (display, DZL_ANIMATION_LINEAR, 250, NULL, "opacity", 1.0, NULL);
+        }
+
+      priv->did_ctrl_opacity = FALSE;
+    }
 
   if (priv->definition_src_location)
-    {
-      ide_source_view_reset_definition_highlight (self);
-    }
+    ide_source_view_reset_definition_highlight (self);
 
   return ret;
 }
@@ -2377,12 +2267,14 @@ ide_source_view_process_press_on_definition (IdeSourceView  *self,
 
       if (gtk_text_iter_in_range (&iter, &definition_highlight_start, &definition_highlight_end))
         {
-          g_autoptr(IdeSourceLocation) src_location = NULL;
+          g_autoptr(IdeLocation) src_location = NULL;
 
-          src_location = ide_source_location_ref (priv->definition_src_location);
+          src_location = g_object_ref (priv->definition_src_location);
           ide_source_view_reset_definition_highlight (self);
           g_signal_emit (self, signals [FOCUS_LOCATION], 0, src_location);
         }
+
+      ide_source_view_reset_definition_highlight (self);
 
       return TRUE;
     }
@@ -2525,7 +2417,7 @@ ide_source_view_get_definition_on_mouse_over_cb (GObject      *object,
   IdeBuffer *buffer = (IdeBuffer *)object;
   g_autoptr(IdeSymbol) symbol = NULL;
   g_autoptr(GError) error = NULL;
-  IdeSourceLocation *srcloc;
+  IdeLocation *srcloc;
   IdeSymbolKind kind;
 
   IDE_ENTRY;
@@ -2535,6 +2427,8 @@ ide_source_view_get_definition_on_mouse_over_cb (GObject      *object,
   g_assert (IDE_IS_SOURCE_VIEW (data->self));
 
   priv = ide_source_view_get_instance_private (data->self);
+
+  priv->waiting_for_symbol = FALSE;
 
   symbol = ide_buffer_get_symbol_at_location_finish (buffer, result, &error);
 
@@ -2551,10 +2445,10 @@ ide_source_view_get_definition_on_mouse_over_cb (GObject      *object,
 
   kind = ide_symbol_get_kind (symbol);
 
-  srcloc = ide_symbol_get_definition_location (symbol);
+  srcloc = ide_symbol_get_location (symbol);
 
   if (srcloc == NULL)
-    srcloc = ide_symbol_get_declaration_location (symbol);
+    srcloc = ide_symbol_get_header_location (symbol);
 
   if (srcloc != NULL)
     {
@@ -2562,17 +2456,17 @@ ide_source_view_get_definition_on_mouse_over_cb (GObject      *object,
       GtkTextIter word_end;
 
       if (priv->definition_src_location != NULL && priv->definition_src_location != srcloc)
-        g_clear_pointer (&priv->definition_src_location, ide_source_location_unref);
+        g_clear_object (&priv->definition_src_location);
 
       if (priv->definition_src_location == NULL)
-        priv->definition_src_location = ide_source_location_ref (srcloc);
+        priv->definition_src_location = g_object_ref (srcloc);
 
       gtk_text_buffer_get_iter_at_mark (GTK_TEXT_BUFFER (buffer),
                                         &word_start, data->word_start_mark);
       gtk_text_buffer_get_iter_at_mark (GTK_TEXT_BUFFER (buffer),
                                         &word_end, data->word_end_mark);
 
-      if (kind == IDE_SYMBOL_HEADER)
+      if (kind == IDE_SYMBOL_KIND_HEADER)
         {
           GtkTextIter line_start = word_start;
           GtkTextIter line_end = word_end;
@@ -2718,6 +2612,12 @@ ide_source_view_real_motion_notify_event (GtkWidget      *widget,
       ide_source_view_reset_definition_highlight (self);
     }
 
+  /* Skip work if we're already active */
+  if (priv->waiting_for_symbol)
+    return ret;
+
+  priv->waiting_for_symbol = TRUE;
+
   data = g_slice_new0 (DefinitionHighlightData);
   data->self = self;
   data->word_start_mark = gtk_text_buffer_create_mark (GTK_TEXT_BUFFER (priv->buffer),
@@ -2740,44 +2640,6 @@ ide_source_view_real_motion_notify_event (GtkWidget      *widget,
 cleanup:
   ide_source_view_reset_definition_highlight (self);
   return ret;
-}
-
-static gboolean
-ide_source_view_query_tooltip (GtkWidget  *widget,
-                               gint        x,
-                               gint        y,
-                               gboolean    keyboard_mode,
-                               GtkTooltip *tooltip)
-{
-  IdeSourceView *self = (IdeSourceView *)widget;
-  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  GtkTextView *text_view = (GtkTextView *)widget;
-
-  g_assert (IDE_IS_SOURCE_VIEW (self));
-  g_assert (GTK_IS_TEXT_VIEW (text_view));
-  g_assert (GTK_IS_TOOLTIP (tooltip));
-
-  if (priv->buffer != NULL)
-    {
-      IdeDiagnostic *diagnostic;
-      GtkTextIter iter;
-
-      gtk_text_view_window_to_buffer_coords (text_view, GTK_TEXT_WINDOW_WIDGET, x, y, &x, &y);
-      gtk_text_view_get_iter_at_location (text_view, &iter, x, y);
-      diagnostic = ide_buffer_get_diagnostic_at_iter (priv->buffer, &iter);
-
-      if (diagnostic)
-        {
-          g_autofree gchar *str = NULL;
-
-          str = ide_diagnostic_get_text_for_display (diagnostic);
-          gtk_tooltip_set_text (tooltip, str);
-
-          return TRUE;
-        }
-    }
-
-  return FALSE;
 }
 
 static void
@@ -2916,17 +2778,15 @@ static void
 ide_source_view_real_cycle_completion (IdeSourceView    *self,
                                        GtkDirectionType  direction)
 {
-  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  GtkSourceView *source_view = (GtkSourceView *)self;
-  GtkSourceCompletion *completion;
+  IdeCompletion *completion;
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
 
-  completion = gtk_source_view_get_completion (source_view);
+  completion = ide_source_view_get_completion (self);
 
-  if (!priv->completion_visible)
+  if (!ide_completion_is_visible (completion))
     {
-      g_signal_emit_by_name (self, "show-completion");
+      ide_completion_show (completion);
       return;
     }
 
@@ -2934,12 +2794,12 @@ ide_source_view_real_cycle_completion (IdeSourceView    *self,
     {
     case GTK_DIR_TAB_FORWARD:
     case GTK_DIR_DOWN:
-      g_signal_emit_by_name (completion, "move-cursor", GTK_SCROLL_STEPS, 1);
+      ide_completion_move_cursor (completion, GTK_MOVEMENT_DISPLAY_LINES, 1);
       break;
 
     case GTK_DIR_TAB_BACKWARD:
     case GTK_DIR_UP:
-      g_signal_emit_by_name (completion, "move-cursor", GTK_SCROLL_STEPS, -1);
+      ide_completion_move_cursor (completion, GTK_MOVEMENT_DISPLAY_LINES, -1);
       break;
 
     case GTK_DIR_LEFT:
@@ -3085,7 +2945,9 @@ ide_source_view_real_duplicate_entire_line (IdeSourceView *self)
       end = begin;
 
       gtk_text_iter_set_line_offset (&begin, 0);
-      gtk_text_iter_forward_to_line_end (&end);
+
+      if (!gtk_text_iter_ends_line (&end))
+        gtk_text_iter_forward_to_line_end (&end);
 
       if (gtk_text_iter_get_line (&begin) == gtk_text_iter_get_line (&end))
         {
@@ -3131,6 +2993,35 @@ ide_source_view_real_join_lines (IdeSourceView *self)
 
   /* Remove our temporary mark. */
   gtk_text_buffer_delete_mark (buffer, mark);
+}
+
+static void
+ide_source_view_real_copy_clipboard_extended (IdeSourceView *self)
+{
+  GtkTextView *text_view = (GtkTextView *)self;
+  GtkClipboard *clipboard;
+  GtkTextBuffer *buffer;
+  GtkTextIter begin, end;
+  g_autofree gchar *text = NULL;
+  g_autofree gchar *new_text = NULL;
+  gsize len;
+
+  clipboard = gtk_widget_get_clipboard (GTK_WIDGET (self), GDK_SELECTION_CLIPBOARD);
+  buffer = gtk_text_view_get_buffer (text_view);
+
+  gtk_text_buffer_get_selection_bounds (buffer, &begin, &end);
+  if  (gtk_text_iter_is_end (&end))
+    {
+      text = gtk_text_buffer_get_text (buffer, &begin, &end, FALSE);
+      len = strlen (text);
+      new_text = g_malloc (len + 1);
+      memcpy (new_text, text, len);
+      new_text[len] = '\n';
+
+      gtk_clipboard_set_text (clipboard, new_text, len + 1);
+    }
+  else
+    gtk_text_buffer_copy_clipboard (buffer, clipboard);
 }
 
 static void
@@ -3468,8 +3359,10 @@ ide_source_view_real_move_error (IdeSourceView    *self,
                                  GtkDirectionType  dir)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
+  IdeDiagnostics *diagnostics;
   GtkTextBuffer *buffer;
   GtkTextMark *insert;
+  GFile *file;
   GtkTextIter iter;
   gboolean wrap_around = TRUE;
   gboolean (*movement) (GtkTextIter *) = NULL;
@@ -3478,6 +3371,11 @@ ide_source_view_real_move_error (IdeSourceView    *self,
 
   if (!priv->buffer)
     return;
+
+  if (!(diagnostics = ide_buffer_get_diagnostics (priv->buffer)))
+    return;
+
+  file = ide_buffer_get_file (priv->buffer);
 
   if (dir == GTK_DIR_RIGHT)
     dir = GTK_DIR_DOWN;
@@ -3505,12 +3403,11 @@ wrapped:
   while (movement (&iter))
     {
       IdeDiagnostic *diag;
+      guint line = gtk_text_iter_get_line (&iter);
 
-      diag = ide_buffer_get_diagnostic_at_iter (priv->buffer, &iter);
-
-      if (diag)
+      if ((diag = ide_diagnostics_get_diagnostic_at_line (diagnostics, file, line)))
         {
-          IdeSourceLocation *location;
+          IdeLocation *location;
 
           location = ide_diagnostic_get_location (diag);
 
@@ -3518,7 +3415,7 @@ wrapped:
             {
               guint line_offset;
 
-              line_offset = ide_source_location_get_line_offset (location);
+              line_offset = ide_location_get_line_offset (location);
               gtk_text_iter_set_line_offset (&iter, 0);
               for (; line_offset; line_offset--)
                 if (gtk_text_iter_ends_line (&iter) || !gtk_text_iter_forward_char (&iter))
@@ -3544,6 +3441,21 @@ wrapped:
     }
 }
 
+static gboolean
+is_same_range (GtkTextIter *new_start,
+               GtkTextIter *old_start,
+               GtkTextIter *new_sel,
+               GtkTextIter *old_sel)
+{
+  if (gtk_text_iter_equal (new_start, old_start))
+    return gtk_text_iter_equal (old_sel, new_sel);
+
+  if (gtk_text_iter_equal (new_start, old_sel))
+    return gtk_text_iter_equal (old_start, new_sel);
+
+  return FALSE;
+}
+
 static void
 ide_source_view_real_restore_insert_mark_full (IdeSourceView *self,
                                                gboolean       move_mark)
@@ -3552,6 +3464,8 @@ ide_source_view_real_restore_insert_mark_full (IdeSourceView *self,
   GtkTextBuffer *buffer;
   GtkTextIter iter;
   GtkTextIter selection;
+  GtkTextIter old_iter;
+  GtkTextIter old_selection;
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
 
@@ -3573,7 +3487,10 @@ ide_source_view_real_restore_insert_mark_full (IdeSourceView *self,
                                              priv->saved_selection_line_column,
                                              &selection);
 
-  gtk_text_buffer_select_range (buffer, &iter, &selection);
+  gtk_text_buffer_get_selection_bounds (buffer, &old_iter, &old_selection);
+
+  if (!is_same_range (&iter, &old_iter, &selection, &old_selection))
+    gtk_text_buffer_select_range (buffer, &iter, &selection);
 
   if (move_mark)
     {
@@ -3588,6 +3505,16 @@ static void
 ide_source_view_real_restore_insert_mark (IdeSourceView *self)
 {
   ide_source_view_real_restore_insert_mark_full (self, TRUE);
+}
+
+void
+_ide_source_view_clear_saved_mark (IdeSourceView *self)
+{
+  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
+
+  g_return_if_fail (IDE_IS_SOURCE_VIEW (self));
+
+  priv->insert_mark_cleared = TRUE;
 }
 
 static void
@@ -3684,22 +3611,6 @@ ide_source_view_real_select_tag (IdeSourceView *self,
 }
 
 static void
-ide_source_view__completion_hide_cb (IdeSourceView       *self,
-                                     GtkSourceCompletion *completion)
-{
-  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  priv->completion_visible = FALSE;
-}
-
-static void
-ide_source_view__completion_show_cb (IdeSourceView       *self,
-                                     GtkSourceCompletion *completion)
-{
-  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  priv->completion_visible = TRUE;
-}
-
-static void
 ide_source_view_real_pop_selection (IdeSourceView *self)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
@@ -3775,63 +3686,55 @@ ide_source_view_real_push_selection (IdeSourceView *self)
 }
 
 static void
-ide_source_view_real_push_snippet (IdeSourceView           *self,
-                                   IdeSourceSnippet        *snippet,
-                                   const GtkTextIter       *location)
+ide_source_view_real_push_snippet (IdeSourceView     *self,
+                                   IdeSnippet        *snippet,
+                                   const GtkTextIter *location)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  IdeContext *ide_context;
-  IdeSourceSnippetContext *context;
-  IdeFile *file;
-  GFile *gfile;
+  g_autoptr(GFile) gparentfile = NULL;
+  g_autoptr(IdeContext) ide_context = NULL;
+  IdeSnippetContext *context;
+  GFile *file = NULL;
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
-  g_assert (IDE_IS_SOURCE_SNIPPET (snippet));
+  g_assert (IDE_IS_SNIPPET (snippet));
   g_assert (location != NULL);
 
-  context = ide_source_snippet_get_context (snippet);
+  context = ide_snippet_get_context (snippet);
 
   if (priv->buffer != NULL)
     {
-      if ((file = ide_buffer_get_file (priv->buffer)) &&
-          (gfile = ide_file_get_file (file)))
+      if ((file = ide_buffer_get_file (priv->buffer)))
         {
           g_autofree gchar *name = NULL;
+          g_autofree gchar *path = NULL;
+          g_autofree gchar *dirname = NULL;
 
-          name = g_file_get_basename (gfile);
-          ide_source_snippet_context_add_variable (context, "filename", name);
+          name = g_file_get_basename (file);
+          gparentfile = g_file_get_parent (file);
+          dirname = g_file_get_path (gparentfile);
+          path = g_file_get_path (file);
+          ide_snippet_context_add_variable (context, "filename", name);
+          ide_snippet_context_add_variable (context, "dirname", dirname);
+          ide_snippet_context_add_variable (context, "path", path);
         }
 
-      if ((ide_context = ide_buffer_get_context (priv->buffer)))
+      if ((ide_context = ide_buffer_ref_context (priv->buffer)))
         {
-          IdeVcs *vcs;
-          IdeVcsConfig *vcs_config;
+          g_autoptr(GFile) workdir = NULL;
 
-          vcs = ide_context_get_vcs (ide_context);
-          if ((vcs_config = ide_vcs_get_config (vcs)))
+          workdir = ide_context_ref_workdir (ide_context);
+          if (workdir && file)
             {
-              GValue value = G_VALUE_INIT;
-
-              g_value_init (&value, G_TYPE_STRING);
-
-              ide_vcs_config_get_config (vcs_config, IDE_VCS_CONFIG_FULL_NAME, &value);
-
-              if (!dzl_str_empty0 (g_value_get_string (&value)))
-                {
-                  ide_source_snippet_context_add_shared_variable (context, "author", g_value_get_string (&value));
-                  ide_source_snippet_context_add_shared_variable (context, "fullname", g_value_get_string (&value));
-                  ide_source_snippet_context_add_shared_variable (context, "username", g_value_get_string (&value));
-                }
-
-              g_value_reset (&value);
-
-              ide_vcs_config_get_config (vcs_config, IDE_VCS_CONFIG_EMAIL, &value);
-
-              if (!dzl_str_empty0 (g_value_get_string (&value)))
-                ide_source_snippet_context_add_shared_variable (context, "email", g_value_get_string (&value));
-
-              g_value_unset (&value);
-              g_object_unref (vcs_config);
+              g_autofree gchar *relative_path = NULL;
+              relative_path = g_file_get_relative_path (workdir, file);
+              ide_snippet_context_add_variable (context, "relative_path", relative_path);
+            }
+          if (workdir && gparentfile)
+            {
+              g_autofree gchar *relative_dirname = NULL;
+              relative_dirname = g_file_get_relative_path (workdir, gparentfile);
+              ide_snippet_context_add_variable (context, "relative_dirname", relative_dirname);
             }
         }
     }
@@ -3945,18 +3848,37 @@ ide_source_view_set_overscroll_num_lines (IdeSourceView *self,
                                           gint           num_lines)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  gint height = gtk_widget_get_allocated_height (GTK_WIDGET (self));
+  gint height;
   gint new_margin;
 
+  g_assert (IDE_IS_SOURCE_VIEW (self));
+
   priv->overscroll_num_lines = num_lines;
+
+  /* Do nothing if there is no height yet */
+  if (!(height = gtk_widget_get_allocated_height (GTK_WIDGET (self))))
+    return;
+
   new_margin = priv->overscroll_num_lines * priv->cached_char_height;
 
   if (new_margin < 0)
-    new_margin = height + new_margin;
+    {
+      new_margin = height + new_margin;
+      if (new_margin < 0)
+        new_margin = height - priv->cached_char_height;
+    }
 
-  new_margin = CLAMP (new_margin, 0, height);
+  new_margin = CLAMP (new_margin, 0, MAX (height - priv->cached_char_height, 0));
 
-  g_object_set (self, "bottom-margin", new_margin, NULL);
+  /* ensure enough space for the overlay scrollbars and their interactive
+   * trough when scrolled to the end.
+   */
+  if (new_margin < 16)
+    new_margin = 16;
+
+  g_object_set (self,
+                "bottom-margin", new_margin,
+                NULL);
 }
 
 static void
@@ -3964,8 +3886,6 @@ ide_source_view_constructed (GObject *object)
 {
   IdeSourceView *self = (IdeSourceView *)object;
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  GtkSourceCompletion *completion;
-  GtkSourceGutter *gutter;
 
   G_OBJECT_CLASS (ide_source_view_parent_class)->constructed (object);
 
@@ -3973,32 +3893,16 @@ ide_source_view_constructed (GObject *object)
 
   ide_source_view_real_set_mode (self, NULL, IDE_SOURCE_VIEW_MODE_TYPE_PERMANENT);
 
-  /*
-   * Completion does not have a way to retrieve visibility, so we need to track that ourselves
-   * by connecting to hide/show. We use this to know if we need to move to the next item in the
-   * result set during IdeSourceView:cycle-completion.
-   */
-  completion = gtk_source_view_get_completion (GTK_SOURCE_VIEW (self));
-  g_signal_connect_object (completion,
-                           "show",
-                           G_CALLBACK (ide_source_view__completion_show_cb),
-                           self,
-                           G_CONNECT_SWAPPED | G_CONNECT_AFTER);
-  g_signal_connect_object (completion,
-                           "hide",
-                           G_CALLBACK (ide_source_view__completion_hide_cb),
-                           self,
-                           G_CONNECT_SWAPPED | G_CONNECT_AFTER);
-
   priv->definition_src_location = NULL;
   ide_source_view_reset_definition_highlight (self);
 
-  gutter = gtk_source_view_get_gutter (GTK_SOURCE_VIEW (self), GTK_TEXT_WINDOW_LEFT);
-  priv->omni_renderer = g_object_new (IDE_TYPE_OMNI_GUTTER_RENDERER,
-                                      "visible", TRUE,
-                                      NULL);
-  g_object_ref_sink (priv->omni_renderer);
-  gtk_source_gutter_insert (gutter, GTK_SOURCE_GUTTER_RENDERER (priv->omni_renderer), 0);
+  priv->completion = _ide_completion_new (GTK_SOURCE_VIEW (self));
+
+  /* Disable sourceview completion always */
+  gtk_source_completion_block_interactive (gtk_source_view_get_completion (GTK_SOURCE_VIEW (self)));
+
+  /* Disable completion until focus-in-event */
+  block_interactive (self);
 }
 
 static void
@@ -4056,7 +3960,7 @@ ide_source_view_real_sort (IdeSourceView *self,
 static void
 ide_source_view_draw_snippet_background (IdeSourceView    *self,
                                          cairo_t          *cr,
-                                         IdeSourceSnippet *snippet,
+                                         IdeSnippet *snippet,
                                          gint              width)
 {
   GtkTextBuffer *buffer;
@@ -4070,12 +3974,12 @@ ide_source_view_draw_snippet_background (IdeSourceView    *self,
   g_assert (GTK_IS_TEXT_VIEW (text_view));
   g_assert (IDE_IS_SOURCE_VIEW (self));
   g_assert (cr);
-  g_assert (IDE_IS_SOURCE_SNIPPET (snippet));
+  g_assert (IDE_IS_SNIPPET (snippet));
 
   buffer = gtk_text_view_get_buffer (text_view);
 
-  mark_begin = ide_source_snippet_get_mark_begin (snippet);
-  mark_end = ide_source_snippet_get_mark_end (snippet);
+  mark_begin = ide_snippet_get_mark_begin (snippet);
+  mark_end = ide_snippet_get_mark_end (snippet);
 
   if (!mark_begin || !mark_end)
     return;
@@ -4107,13 +4011,13 @@ ide_source_view_draw_snippets_background (IdeSourceView *self,
   window = gtk_text_view_get_window (text_view, GTK_TEXT_WINDOW_TEXT);
   width = gdk_window_get_width (window);
 
-  gdk_cairo_set_source_rgba (cr, &priv->snippet_area_background_rgba);
-
   cairo_save (cr);
+
+  gdk_cairo_set_source_rgba (cr, &priv->snippet_area_background_rgba);
 
   for (guint i = 0; i < priv->snippets->length; i++)
     {
-      IdeSourceSnippet *snippet = g_queue_peek_nth (priv->snippets, i);
+      IdeSnippet *snippet = g_queue_peek_nth (priv->snippets, i);
 
       ide_source_view_draw_snippet_background (self,
                                                cr,
@@ -4142,13 +4046,15 @@ ide_source_view_real_draw_layer (GtkTextView      *text_view,
     {
       if (priv->snippets->length)
         ide_source_view_draw_snippets_background (self, cr);
-    }
 
-  if (layer == GTK_TEXT_VIEW_LAYER_ABOVE)
-    {
       if (g_signal_has_handler_pending (self, signals [DRAW_BUBBLES], 0, FALSE))
         {
+          GdkRectangle rect;
+
+          gtk_text_view_get_visible_rect (text_view, &rect);
+
           cairo_save (cr);
+          cairo_translate (cr, rect.x, rect.y);
           g_signal_emit (self, signals [DRAW_BUBBLES], 0, cr);
           cairo_restore (cr);
         }
@@ -4161,25 +4067,26 @@ ide_source_view_focus_in_event (GtkWidget     *widget,
 {
   IdeSourceView *self = (IdeSourceView *)widget;
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  GtkSourceCompletion *completion;
-  IdeWorkbench *workbench;
   gboolean ret;
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
 
-  /*
-   * Restore the completion window now that we have regained focus.
-   */
-  completion = gtk_source_view_get_completion (GTK_SOURCE_VIEW (self));
-  gtk_source_completion_unblock_interactive (completion);
+  /* Restore the completion window now that we have regained focus. */
+  unblock_interactive (self);
+
+  /* Force size allocation immediately if we have something queued. */
+  if (priv->delay_size_allocate_chainup)
+    {
+      g_clear_handle_id (&priv->delay_size_allocate_chainup, g_source_remove);
+      ide_source_view_do_size_allocate_hack_cb (self);
+    }
 
   /*
    * Restore the insert mark, but ignore selections (since we cant ensure they
    * will stay looking selected, as the other frame could be a view into our
    * own buffer).
    */
-  workbench = ide_widget_get_workbench (GTK_WIDGET (widget));
-  if (!workbench || ide_workbench_get_selection_owner (workbench) != G_OBJECT (self))
+  if (get_selection_owner (self) != self)
     {
       priv->saved_selection_line = priv->saved_line;
       priv->saved_selection_line_column = priv->saved_line_column;
@@ -4201,7 +4108,7 @@ ide_source_view_focus_out_event (GtkWidget     *widget,
                                  GdkEventFocus *event)
 {
   IdeSourceView *self = (IdeSourceView *)widget;
-  GtkSourceCompletion *completion;
+  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
   gboolean ret;
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
@@ -4217,71 +4124,17 @@ ide_source_view_focus_out_event (GtkWidget     *widget,
    * Block the completion window while we are not focused. It confuses text
    * insertion and such.
    */
-  completion = gtk_source_view_get_completion (GTK_SOURCE_VIEW (self));
-  gtk_source_completion_block_interactive (completion);
+  block_interactive (self);
 
   /* We don't want highlight-current-line unless the widget is in focus, so
    * disable it until we get re-focused.
    */
   gtk_source_view_set_highlight_current_line (GTK_SOURCE_VIEW (self), FALSE);
 
+  if (priv->cursor != NULL)
+    ide_cursor_remove_cursors (priv->cursor);
+
   return ret;
-}
-
-static void
-ide_source_view_real_begin_word_completion (IdeSourceView *self,
-                                            gint           direction)
-{
-  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  GtkSourceCompletionContext *cc;
-  GtkSourceCompletion *completion;
-  IdeContext *context;
-  GList providers = { 0 };
-  GtkTextIter insert;
-
-  IDE_ENTRY;
-
-  g_assert (IDE_IS_SOURCE_VIEW (self));
-
-  if (direction != 1 && direction != -1)
-    direction = 1;
-
-  if (priv->buffer == NULL || NULL == (context = ide_buffer_get_context (priv->buffer)))
-    return;
-
-  completion = gtk_source_view_get_completion (GTK_SOURCE_VIEW (self));
-
-  /* Move to the next row if completion is already visible */
-  if (priv->completion_visible)
-    {
-      g_signal_emit_by_name (completion, "move-cursor", GTK_SCROLL_STEPS, direction);
-      IDE_EXIT;
-    }
-
-  if (priv->word_completion_provider == NULL)
-    {
-      priv->word_completion_provider = g_object_new (IDE_TYPE_WORD_COMPLETION_PROVIDER, NULL);
-      gtk_source_completion_add_provider (completion,
-                                          GTK_SOURCE_COMPLETION_PROVIDER (priv->word_completion_provider),
-                                          NULL);
-    }
-
-  g_object_set (priv->word_completion_provider,
-                "direction", direction,
-                NULL);
-
-  ide_buffer_get_selection_bounds (priv->buffer, &insert, NULL);
-
-  cc = g_object_new (GTK_SOURCE_TYPE_COMPLETION_CONTEXT,
-                     "activation", GTK_SOURCE_COMPLETION_ACTIVATION_USER_REQUESTED,
-                     "completion", completion,
-                     "iter", &insert,
-                     NULL);
-
-  providers.data = priv->word_completion_provider;
-  gtk_source_completion_show (completion, &providers, cc);
-
-  IDE_EXIT;
 }
 
 static void
@@ -4346,7 +4199,7 @@ ide_source_view_goto_definition_symbol_cb (GObject      *object,
   g_autoptr(IdeSymbol) symbol = NULL;
   IdeBuffer *buffer = (IdeBuffer *)object;
   g_autoptr(GError) error = NULL;
-  IdeSourceLocation *srcloc;
+  IdeLocation *srcloc;
 
   IDE_ENTRY;
 
@@ -4361,20 +4214,20 @@ ide_source_view_goto_definition_symbol_cb (GObject      *object,
       IDE_EXIT;
     }
 
-  srcloc = ide_symbol_get_definition_location (symbol);
+  srcloc = ide_symbol_get_location (symbol);
 
   if (srcloc == NULL)
-    srcloc = ide_symbol_get_declaration_location (symbol);
+    srcloc = ide_symbol_get_header_location (symbol);
 
   if (srcloc != NULL)
     {
-      guint line = ide_source_location_get_line (srcloc);
-      guint line_offset = ide_source_location_get_line_offset (srcloc);
-      IdeFile *file = ide_source_location_get_file (srcloc);
-      IdeFile *our_file = ide_buffer_get_file (buffer);
+      guint line = ide_location_get_line (srcloc);
+      guint line_offset = ide_location_get_line_offset (srcloc);
+      GFile *file = ide_location_get_file (srcloc);
+      GFile *our_file = ide_buffer_get_file (buffer);
 
 #ifdef IDE_ENABLE_TRACE
-      const gchar *filename = ide_file_get_path (file);
+      const gchar *filename = g_file_peek_path (file);
 
       IDE_TRACE_MSG ("%s => %s +%u:%u",
                      ide_symbol_get_name (symbol),
@@ -4388,7 +4241,7 @@ ide_source_view_goto_definition_symbol_cb (GObject      *object,
        * If we are navigating within this file, just stay captive instead of
        * potentially allowing jumping to the file in another editor.
        */
-      if (ide_file_equal (file, our_file))
+      if (g_file_equal (file, our_file))
         {
           GtkTextIter iter;
 
@@ -4431,12 +4284,11 @@ ide_source_view_real_goto_definition (IdeSourceView *self)
 static void
 ide_source_view_real_hide_completion (IdeSourceView *self)
 {
-  GtkSourceCompletion *completion;
+  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
 
-  completion = gtk_source_view_get_completion (GTK_SOURCE_VIEW (self));
-  gtk_source_completion_hide (completion);
+  ide_completion_hide (priv->completion);
 }
 
 static void
@@ -4522,11 +4374,11 @@ ide_source_view_get_overwrite (IdeSourceView *self)
 
 static gchar *
 ide_source_view_get_fixit_label (IdeSourceView *self,
-                                 IdeFixit      *fixit)
+                                 IdeTextEdit      *fixit)
 {
-  IdeSourceLocation *begin_loc;
-  IdeSourceLocation *end_loc;
-  IdeSourceRange *range;
+  IdeLocation *begin_loc;
+  IdeLocation *end_loc;
+  IdeRange *range;
   GtkTextBuffer *buffer;
   GtkTextIter begin;
   GtkTextIter end;
@@ -4538,11 +4390,11 @@ ide_source_view_get_fixit_label (IdeSourceView *self,
   g_assert (IDE_IS_SOURCE_VIEW (self));
   g_assert (fixit != NULL);
 
-  range = ide_fixit_get_range (fixit);
+  range = ide_text_edit_get_range (fixit);
   if (range == NULL)
     goto cleanup;
 
-  new_text = g_strdup (ide_fixit_get_text (fixit));
+  new_text = g_strdup (ide_text_edit_get_text (fixit));
   if (new_text == NULL)
     goto cleanup;
 
@@ -4550,11 +4402,11 @@ ide_source_view_get_fixit_label (IdeSourceView *self,
   if (!IDE_IS_BUFFER (buffer))
     goto cleanup;
 
-  begin_loc = ide_source_range_get_begin (range);
-  end_loc = ide_source_range_get_end (range);
+  begin_loc = ide_range_get_begin (range);
+  end_loc = ide_range_get_end (range);
 
-  ide_buffer_get_iter_at_source_location (IDE_BUFFER (buffer), &begin, begin_loc);
-  ide_buffer_get_iter_at_source_location (IDE_BUFFER (buffer), &end, end_loc);
+  ide_buffer_get_iter_at_location (IDE_BUFFER (buffer), &begin, begin_loc);
+  ide_buffer_get_iter_at_location (IDE_BUFFER (buffer), &end, end_loc);
 
   old_text = gtk_text_iter_get_slice (&begin, &end);
 
@@ -4596,7 +4448,7 @@ static void
 ide_source_view__fixit_activate (IdeSourceView *self,
                                  GtkMenuItem   *menu_item)
 {
-  IdeFixit *fixit;
+  IdeTextEdit *fixit;
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
   g_assert (GTK_IS_MENU_ITEM (menu_item));
@@ -4605,8 +4457,8 @@ ide_source_view__fixit_activate (IdeSourceView *self,
 
   if (fixit != NULL)
     {
-      IdeSourceLocation *srcloc;
-      IdeSourceRange *range;
+      IdeLocation *srcloc;
+      IdeRange *range;
       GtkTextBuffer *buffer;
       const gchar *text;
       GtkTextIter begin;
@@ -4616,14 +4468,14 @@ ide_source_view__fixit_activate (IdeSourceView *self,
       if (!IDE_IS_BUFFER (buffer))
         return;
 
-      text = ide_fixit_get_text (fixit);
-      range = ide_fixit_get_range (fixit);
+      text = ide_text_edit_get_text (fixit);
+      range = ide_text_edit_get_range (fixit);
 
-      srcloc = ide_source_range_get_begin (range);
-      ide_buffer_get_iter_at_source_location (IDE_BUFFER (buffer), &begin, srcloc);
+      srcloc = ide_range_get_begin (range);
+      ide_buffer_get_iter_at_location (IDE_BUFFER (buffer), &begin, srcloc);
 
-      srcloc = ide_source_range_get_end (range);
-      ide_buffer_get_iter_at_source_location (IDE_BUFFER (buffer), &end, srcloc);
+      srcloc = ide_range_get_end (range);
+      ide_buffer_get_iter_at_location (IDE_BUFFER (buffer), &end, srcloc);
 
       gtk_text_buffer_begin_user_action (buffer);
       gtk_text_buffer_delete (buffer, &begin, &end);
@@ -4638,13 +4490,14 @@ ide_source_view_real_populate_popup (GtkTextView *text_view,
 {
   IdeSourceView *self = (IdeSourceView *)text_view;
   GtkSeparatorMenuItem *sep;
+  IdeDiagnostics *diagnostics;
+  IdeDiagnostic *diagnostic = NULL;
   GtkTextBuffer *buffer;
   GtkMenuItem *menu_item;
   GtkTextMark *insert;
   GtkTextIter iter;
   GtkTextIter begin;
   GtkTextIter end;
-  IdeDiagnostic *diagnostic;
   GMenu *model;
 
   g_assert (GTK_IS_TEXT_VIEW (text_view));
@@ -4673,15 +4526,18 @@ ide_source_view_real_populate_popup (GtkTextView *text_view,
 
   /*
    * Check if we have a diagnostic at this position and if there are fixits associated with it.
-   * If so, display the "Apply Fixit" menu item with available fixits.
+   * If so, display the "Apply TextEdit" menu item with available fixits.
    */
-  diagnostic = ide_buffer_get_diagnostic_at_iter (IDE_BUFFER (buffer), &iter);
+  if ((diagnostics = ide_buffer_get_diagnostics (IDE_BUFFER (buffer))))
+    diagnostic = ide_diagnostics_get_diagnostic_at_line (diagnostics,
+                                                         ide_buffer_get_file (IDE_BUFFER (buffer)),
+                                                         gtk_text_iter_get_line (&iter));
 
   if (diagnostic != NULL)
     {
       guint num_fixits;
 
-      num_fixits = ide_diagnostic_get_num_fixits (diagnostic);
+      num_fixits = ide_diagnostic_get_n_fixits (diagnostic);
 
       if (num_fixits > 0)
         {
@@ -4705,7 +4561,7 @@ ide_source_view_real_populate_popup (GtkTextView *text_view,
 
           for (i = 0; i < num_fixits; i++)
             {
-              IdeFixit *fixit;
+              IdeTextEdit *fixit;
               gchar *label;
 
               fixit = ide_diagnostic_get_fixit (diagnostic, i);
@@ -4719,8 +4575,8 @@ ide_source_view_real_populate_popup (GtkTextView *text_view,
 
               g_object_set_data_full (G_OBJECT (menu_item),
                                       "IDE_FIXIT",
-                                      ide_fixit_ref (fixit),
-                                      (GDestroyNotify)ide_fixit_unref);
+                                      g_object_ref (fixit),
+                                      (GDestroyNotify)g_object_unref);
 
               g_signal_connect_object (menu_item,
                                        "activate",
@@ -4798,6 +4654,8 @@ ide_source_view_do_size_allocate_hack_cb (gpointer data)
 
   GTK_WIDGET_CLASS (ide_source_view_parent_class)->size_allocate (GTK_WIDGET (self), &alloc);
 
+  ide_source_view_set_overscroll_num_lines (self, priv->overscroll_num_lines);
+
   return G_SOURCE_REMOVE;
 }
 
@@ -4847,8 +4705,7 @@ ide_source_view_do_size_allocate_hack (IdeSourceView *self,
    * If we are animating at 60 FPS, we should get another size-allocate within
    * the frame cycle, typically 17 msec.
    */
-  if (priv->delay_size_allocate_chainup)
-    g_source_remove (priv->delay_size_allocate_chainup);
+  g_clear_handle_id (&priv->delay_size_allocate_chainup, g_source_remove);
   priv->delay_size_allocate_chainup = g_timeout_add (30,
                                                      ide_source_view_do_size_allocate_hack_cb,
                                                      self);
@@ -4868,9 +4725,10 @@ ide_source_view_size_allocate (GtkWidget     *widget,
   g_assert (allocation != NULL);
 
   if (!ide_source_view_do_size_allocate_hack (self, allocation))
-    GTK_WIDGET_CLASS (ide_source_view_parent_class)->size_allocate (GTK_WIDGET (self), allocation);
-
-  ide_source_view_set_overscroll_num_lines (self, priv->overscroll_num_lines);
+    {
+      GTK_WIDGET_CLASS (ide_source_view_parent_class)->size_allocate (GTK_WIDGET (self), allocation);
+      ide_source_view_set_overscroll_num_lines (self, priv->overscroll_num_lines);
+    }
 }
 
 static gboolean
@@ -4989,11 +4847,10 @@ ide_source_view_rename_edits_applied (GObject      *object,
                                       gpointer      user_data)
 {
   g_autoptr(IdeSourceView) self = user_data;
-  IdeBufferManager *buffer_manager = (IdeBufferManager *)object;
 
   IDE_ENTRY;
 
-  g_assert (IDE_IS_BUFFER_MANAGER (buffer_manager));
+  g_assert (IDE_IS_BUFFER_MANAGER (object));
   g_assert (G_IS_ASYNC_RESULT (result));
   g_assert (IDE_IS_SOURCE_VIEW (self));
 
@@ -5016,8 +4873,8 @@ ide_source_view_rename_edits_cb (GObject      *object,
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
   g_autoptr(GPtrArray) edits = NULL;
   g_autoptr(GError) error = NULL;
+  g_autoptr(IdeContext) context = NULL;
   IdeBufferManager *buffer_manager;
-  IdeContext *context;
 
   IDE_ENTRY;
 
@@ -5034,11 +4891,13 @@ ide_source_view_rename_edits_cb (GObject      *object,
 
   g_assert (edits != NULL);
 
-  context = ide_buffer_get_context (priv->buffer);
-  buffer_manager = ide_context_get_buffer_manager (context);
+  IDE_PTR_ARRAY_SET_FREE_FUNC (edits, g_object_unref);
+
+  context = ide_buffer_ref_context (priv->buffer);
+  buffer_manager = ide_buffer_manager_from_context (context);
 
   ide_buffer_manager_apply_edits_async (buffer_manager,
-                                        g_steal_pointer (&edits),
+                                        IDE_PTR_ARRAY_STEAL_FULL (&edits),
                                         NULL,
                                         ide_source_view_rename_edits_applied,
                                         g_steal_pointer (&self));
@@ -5052,7 +4911,7 @@ ide_source_view_rename_activate (IdeSourceView    *self,
                                  DzlSimplePopover *popover)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  g_autoptr(IdeSourceLocation) location = NULL;
+  g_autoptr(IdeLocation) location = NULL;
   IdeRenameProvider *provider;
 
   IDE_ENTRY;
@@ -5088,7 +4947,7 @@ ide_source_view_real_begin_rename (IdeSourceView *self)
 {
   IdeRenameProvider *provider;
   DzlSimplePopover *popover;
-  g_autofree gchar *uri = NULL;
+  g_autofree gchar *title = NULL;
   GtkTextBuffer *buffer;
   GtkTextMark *insert;
   GtkTextIter iter;
@@ -5108,14 +4967,14 @@ ide_source_view_real_begin_rename (IdeSourceView *self)
     }
 
   insert = gtk_text_buffer_get_insert (buffer);
-  uri = ide_buffer_get_uri (IDE_BUFFER (buffer));
+  title = ide_buffer_dup_title (IDE_BUFFER (buffer));
 
   gtk_text_buffer_get_iter_at_mark (buffer, &iter, insert);
 
-  IDE_TRACE_MSG ("Renaming symbol found at %s: %d:%d",
-                 uri,
-                 gtk_text_iter_get_line (&iter) + 1,
-                 gtk_text_iter_get_line_offset (&iter) + 1);
+  g_debug ("Renaming symbol from %s +%d:%d",
+           title,
+           gtk_text_iter_get_line (&iter) + 1,
+           gtk_text_iter_get_line_offset (&iter) + 1);
 
   gtk_text_buffer_select_range (buffer, &iter, &iter);
   gtk_text_view_get_iter_location (GTK_TEXT_VIEW (self), &iter, &loc);
@@ -5203,7 +5062,7 @@ ide_source_view_real_find_references_jump (IdeSourceView *self,
                                            GtkListBoxRow *row,
                                            GtkListBox    *list_box)
 {
-  IdeSourceLocation *location;
+  IdeLocation *location;
 
   IDE_ENTRY;
 
@@ -5211,7 +5070,7 @@ ide_source_view_real_find_references_jump (IdeSourceView *self,
   g_assert (GTK_IS_LIST_BOX_ROW (row));
   g_assert (GTK_IS_LIST_BOX (list_box));
 
-  location = g_object_get_data (G_OBJECT (row), "IDE_SOURCE_LOCATION");
+  location = g_object_get_data (G_OBJECT (row), "IDE_LOCATION");
 
   if (location != NULL)
     g_signal_emit (self, signals [FOCUS_LOCATION], 0, location);
@@ -5221,11 +5080,11 @@ ide_source_view_real_find_references_jump (IdeSourceView *self,
 
 static gboolean
 insert_mark_within_range (IdeBuffer      *buffer,
-                          IdeSourceRange *range)
+                          IdeRange *range)
 {
   GtkTextMark *insert = gtk_text_buffer_get_insert (GTK_TEXT_BUFFER (buffer));
-  IdeSourceLocation *begin = ide_source_range_get_begin (range);
-  IdeSourceLocation *end = ide_source_range_get_end (range);
+  IdeLocation *begin = ide_range_get_begin (range);
+  IdeLocation *end = ide_range_get_end (range);
   GtkTextIter iter;
   GtkTextIter begin_iter;
   GtkTextIter end_iter;
@@ -5234,8 +5093,8 @@ insert_mark_within_range (IdeBuffer      *buffer,
     return FALSE;
 
   gtk_text_buffer_get_iter_at_mark (GTK_TEXT_BUFFER (buffer), &iter, insert);
-  ide_buffer_get_iter_at_source_location (buffer, &begin_iter, begin);
-  ide_buffer_get_iter_at_source_location (buffer, &end_iter, end);
+  ide_buffer_get_iter_at_location (buffer, &begin_iter, begin);
+  ide_buffer_get_iter_at_location (buffer, &end_iter, end);
 
   return gtk_text_iter_compare (&begin_iter, &iter) <= 0 &&
          gtk_text_iter_compare (&end_iter, &iter) >= 0;
@@ -5250,7 +5109,7 @@ ide_source_view_find_references_cb (GObject      *object,
   IdeSymbolResolver *symbol_resolver = (IdeSymbolResolver *)object;
   g_autoptr(GPtrArray) references = NULL;
   g_autoptr(GError) error = NULL;
-  g_autoptr(GTask) task = user_data;
+  g_autoptr(IdeTask) task = user_data;
   FindReferencesTaskData *data;
   IdeSourceView *self;
   IdeSourceViewPrivate *priv;
@@ -5265,13 +5124,15 @@ ide_source_view_find_references_cb (GObject      *object,
 
   g_assert (IDE_IS_SYMBOL_RESOLVER (symbol_resolver));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   references = ide_symbol_resolver_find_references_finish (symbol_resolver, result, &error);
 
-  self = g_task_get_source_object (task);
+  IDE_PTR_ARRAY_SET_FREE_FUNC (references, g_object_unref);
+
+  self = ide_task_get_source_object (task);
   priv = ide_source_view_get_instance_private (self);
-  data = g_task_get_task_data (task);
+  data = ide_task_get_task_data (task);
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
   g_assert (data != NULL);
@@ -5286,11 +5147,12 @@ ide_source_view_find_references_cb (GObject      *object,
       GCancellable *cancellable;
       IdeSymbolResolver *resolver;
 
-      cancellable = g_task_get_cancellable (task);
+      cancellable = ide_task_get_cancellable (task);
       resolver = g_ptr_array_index (data->resolvers, data->resolvers->len - 1);
 
       ide_symbol_resolver_find_references_async (resolver,
                                                  data->location,
+                                                 ide_buffer_get_language_id (priv->buffer),
                                                  cancellable,
                                                  ide_source_view_find_references_cb,
                                                  g_steal_pointer (&task));
@@ -5333,29 +5195,27 @@ ide_source_view_find_references_cb (GObject      *object,
 
   if (references != NULL && references->len > 0)
     {
-      IdeContext *context = ide_buffer_get_context (priv->buffer);
-      IdeVcs *vcs = ide_context_get_vcs (context);
-      GFile *workdir = ide_vcs_get_working_directory (vcs);
+      g_autoptr(IdeContext) context = ide_buffer_ref_context (priv->buffer);
+      g_autoptr(GFile) workdir = ide_context_ref_workdir (context);
 
       for (guint i = 0; i < references->len; i++)
         {
-          IdeSourceRange *range = g_ptr_array_index (references, i);
-          IdeSourceLocation *begin = ide_source_range_get_begin (range);
-          IdeFile *file = ide_source_location_get_file (begin);
-          GFile *gfile = ide_file_get_file (file);
-          guint line = ide_source_location_get_line (begin);
-          guint line_offset = ide_source_location_get_line_offset (begin);
+          IdeRange *range = g_ptr_array_index (references, i);
+          IdeLocation *begin = ide_range_get_begin (range);
+          GFile *file = ide_location_get_file (begin);
+          guint line = ide_location_get_line (begin);
+          guint line_offset = ide_location_get_line_offset (begin);
           g_autofree gchar *name = NULL;
           g_autofree gchar *text = NULL;
           GtkListBoxRow *row;
           GtkLabel *label;
 
-          if (g_file_has_prefix (gfile, workdir))
-            name = g_file_get_relative_path (workdir, gfile);
-          else if (g_file_is_native (gfile))
-            name = g_file_get_path (gfile);
+          if (g_file_has_prefix (file, workdir))
+            name = g_file_get_relative_path (workdir, file);
+          else if (g_file_is_native (file))
+            name = g_file_get_path (file);
           else
-            name = g_file_get_uri (gfile);
+            name = g_file_get_uri (file);
 
           /* translators: %s is the filename, then line number, column number. <> are pango markup */
           text = g_strdup_printf (_("<b>%s</b> — <small>Line %u, Column %u</small>"),
@@ -5372,9 +5232,9 @@ ide_source_view_find_references_cb (GObject      *object,
                               "visible", TRUE,
                               NULL);
           g_object_set_data_full (G_OBJECT (row),
-                                  "IDE_SOURCE_LOCATION",
-                                  ide_source_location_ref (begin),
-                                  (GDestroyNotify)ide_source_location_unref);
+                                  "IDE_LOCATION",
+                                  g_object_ref (begin),
+                                  g_object_unref);
           gtk_container_add (GTK_CONTAINER (list_box), GTK_WIDGET (row));
 
           if (insert_mark_within_range (priv->buffer, range))
@@ -5400,6 +5260,8 @@ ide_source_view_find_references_cb (GObject      *object,
 
   g_signal_connect (popover, "hide", G_CALLBACK (gtk_widget_destroy), NULL);
 
+  ide_task_return_boolean (task, TRUE);
+
   IDE_EXIT;
 }
 
@@ -5407,41 +5269,38 @@ static void
 ide_source_view_real_find_references (IdeSourceView *self)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  g_autoptr(GTask) task = NULL;
-  IdeExtensionSetAdapter *adapter;
+  g_autoptr(IdeTask) task = NULL;
+  g_autoptr(GPtrArray) resolvers = NULL;
   FindReferencesTaskData *data;
-  guint n_extensions;
   IdeSymbolResolver *resolver;
 
   IDE_ENTRY;
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
 
-  task = g_task_new (self, NULL, NULL, NULL);
+  task = ide_task_new (self, NULL, NULL, NULL);
+  ide_task_set_source_tag (task, ide_source_view_real_find_references);
 
-  adapter = ide_buffer_get_symbol_resolvers (priv->buffer);
-  n_extensions = ide_extension_set_adapter_get_n_extensions (adapter);
+  resolvers = ide_buffer_get_symbol_resolvers (priv->buffer);
+  IDE_PTR_ARRAY_SET_FREE_FUNC (resolvers, g_object_unref);
 
-  if (!n_extensions)
+  if (resolvers->len == 0)
     {
       g_debug ("No symbol resolver is available");
-
       IDE_EXIT;
     }
 
   data = g_slice_new0 (FindReferencesTaskData);
-  data->resolvers = g_ptr_array_new_with_free_func (g_object_unref);
+  data->resolvers = g_steal_pointer (&resolvers);
   data->location = ide_buffer_get_insert_location (priv->buffer);
-  g_task_set_task_data (task, data, (GDestroyNotify)find_references_task_data_free);
-
-  ide_extension_set_adapter_foreach (adapter, find_references_task_get_extension, data);
-  g_assert (data->resolvers->len > 0);
+  ide_task_set_task_data (task, data, find_references_task_data_free);
 
   resolver = g_ptr_array_index (data->resolvers, data->resolvers->len - 1);
 
   /* Try each symbol resolver one by one to find references. */
   ide_symbol_resolver_find_references_async (resolver,
                                              data->location,
+                                             ide_buffer_get_language_id (priv->buffer),
                                              NULL,
                                              ide_source_view_find_references_cb,
                                              g_steal_pointer (&task));
@@ -5452,31 +5311,34 @@ ide_source_view_real_find_references (IdeSourceView *self)
 static void
 ide_source_view_real_request_documentation (IdeSourceView *self)
 {
-  g_autofree gchar *word = NULL;
-  GtkTextBuffer *buffer;
-  GtkTextIter begin;
-  GtkTextIter end;
+  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
+  GtkTextIter iter;
 
   g_assert (IDE_IS_SOURCE_VIEW (self));
 
-  buffer = gtk_text_view_get_buffer (GTK_TEXT_VIEW (self));
+  if (priv->buffer == NULL)
+    return;
 
-  if (!gtk_text_buffer_get_selection_bounds (buffer, &begin, &end))
-    {
-      gtk_text_iter_order (&begin, &end);
+  ide_buffer_get_selection_bounds (priv->buffer, &iter, NULL);
 
-      if (!_ide_source_iter_starts_extra_natural_word (&begin))
-        {
-          _ide_source_iter_backward_extra_natural_word_start (&begin);
-          end = begin;
-        }
+  _ide_hover_display (priv->hover, &iter);
+}
 
-      _ide_source_iter_forward_extra_natural_word_end (&end);
-    }
+static void
+ide_source_view_real_undo (GtkSourceView *view)
+{
+  IdeSourceView *self = (IdeSourceView *)view;
 
-  word = gtk_text_iter_get_slice (&begin, &end);
+  g_assert (IDE_IS_SOURCE_VIEW (self));
 
-  g_signal_emit (self, signals [DOCUMENTATION_REQUESTED], 0, word);
+  /*
+   * Disable things that could confuse undo. For example, we need to bail on
+   * any in-flight snippets because they just can't deal with the buffer
+   * changes correctly given the GtkTextMark vs run-length design.
+   */
+  ide_source_view_clear_snippets (self);
+
+  GTK_SOURCE_VIEW_CLASS (ide_source_view_parent_class)->undo (view);
 }
 
 static void
@@ -5495,6 +5357,21 @@ ide_source_view_real_reset (IdeSourceView *self)
 }
 
 static void
+ide_source_view_destroy (GtkWidget *widget)
+{
+  IdeSourceView *self = (IdeSourceView *)widget;
+  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
+
+  g_assert (IDE_IS_SOURCE_VIEW (self));
+
+  /* Ensure we release the buffer immediately */
+  if (priv->buffer_signals != NULL)
+    dzl_signal_group_set_target (priv->buffer_signals, NULL);
+
+  GTK_WIDGET_CLASS (ide_source_view_parent_class)->destroy (widget);
+}
+
+static void
 ide_source_view_dispose (GObject *object)
 {
   IdeSourceView *self = (IdeSourceView *)object;
@@ -5503,32 +5380,28 @@ ide_source_view_dispose (GObject *object)
   if (priv->hadj_animation)
     {
       dzl_animation_stop (priv->hadj_animation);
-      dzl_clear_weak_pointer (&priv->hadj_animation);
+      g_clear_weak_pointer (&priv->hadj_animation);
     }
 
   if (priv->vadj_animation)
     {
       dzl_animation_stop (priv->vadj_animation);
-      dzl_clear_weak_pointer (&priv->vadj_animation);
+      g_clear_weak_pointer (&priv->vadj_animation);
     }
 
   ide_source_view_clear_snippets (self);
 
-  if (priv->delay_size_allocate_chainup)
-    {
-      g_source_remove (priv->delay_size_allocate_chainup);
-      priv->delay_size_allocate_chainup = 0;
-    }
+  g_clear_handle_id (&priv->delay_size_allocate_chainup, g_source_remove);
 
+  g_clear_object (&priv->hover);
+  g_clear_object (&priv->completion);
   g_clear_object (&priv->capture);
-  g_clear_object (&priv->indenter_adapter);
-  g_clear_object (&priv->snippets_provider);
+  ide_clear_and_destroy_object (&priv->indenter_adapter);
   g_clear_object (&priv->css_provider);
   g_clear_object (&priv->mode);
   g_clear_object (&priv->buffer_signals);
   g_clear_object (&priv->file_setting_bindings);
-  g_clear_object (&priv->word_completion_provider);
-  g_clear_object (&priv->omni_renderer);
+  g_clear_object (&priv->gutter);
 
   if (priv->command_str != NULL)
     {
@@ -5545,7 +5418,6 @@ ide_source_view_finalize (GObject *object)
   IdeSourceView *self = (IdeSourceView *)object;
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
 
-  g_clear_object (&priv->completion_providers_signals);
   g_clear_pointer (&priv->display_name, g_free);
   g_clear_pointer (&priv->font_desc, pango_font_description_free);
   g_clear_pointer (&priv->selections, g_queue_free);
@@ -5572,12 +5444,12 @@ ide_source_view_get_property (GObject    *object,
       g_value_set_boolean (value, priv->auto_indent);
       break;
 
-    case PROP_COUNT:
-      g_value_set_int (value, ide_source_view_get_count (self));
+    case PROP_COMPLETION_N_ROWS:
+      g_value_set_uint (value, ide_completion_get_n_rows (priv->completion));
       break;
 
-    case PROP_ENABLE_WORD_COMPLETION:
-      g_value_set_boolean (value, ide_source_view_get_enable_word_completion (self));
+    case PROP_COUNT:
+      g_value_set_int (value, ide_source_view_get_count (self));
       break;
 
     case PROP_FILE_SETTINGS:
@@ -5598,6 +5470,10 @@ ide_source_view_get_property (GObject    *object,
 
     case PROP_INSERT_MATCHING_BRACE:
       g_value_set_boolean (value, ide_source_view_get_insert_matching_brace (self));
+      break;
+
+    case PROP_INTERACTIVE_COMPLETION:
+      g_value_set_boolean (value, priv->interactive_completion);
       break;
 
     case PROP_MODE_DISPLAY_NAME:
@@ -5632,8 +5508,8 @@ ide_source_view_get_property (GObject    *object,
       g_value_set_boolean (value, ide_source_view_get_show_line_numbers (self));
       break;
 
-    case PROP_SNIPPET_COMPLETION:
-      g_value_set_boolean (value, ide_source_view_get_snippet_completion (self));
+    case PROP_SHOW_RELATIVE_LINE_NUMBERS:
+      g_value_set_boolean (value, ide_source_view_get_show_relative_line_numbers (self));
       break;
 
     case PROP_OVERSCROLL:
@@ -5661,12 +5537,13 @@ ide_source_view_set_property (GObject      *object,
       ide_source_view_update_auto_indent_override (self);
       break;
 
-    case PROP_COUNT:
-      ide_source_view_set_count (self, g_value_get_int (value));
+    case PROP_COMPLETION_N_ROWS:
+      if (priv->completion != NULL)
+        ide_completion_set_n_rows (priv->completion, g_value_get_uint (value));
       break;
 
-    case PROP_ENABLE_WORD_COMPLETION:
-      ide_source_view_set_enable_word_completion (self, g_value_get_boolean (value));
+    case PROP_COUNT:
+      ide_source_view_set_count (self, g_value_get_int (value));
       break;
 
     case PROP_FONT_NAME:
@@ -5687,6 +5564,10 @@ ide_source_view_set_property (GObject      *object,
 
     case PROP_INSERT_MATCHING_BRACE:
       ide_source_view_set_insert_matching_brace (self, g_value_get_boolean (value));
+      break;
+
+    case PROP_INTERACTIVE_COMPLETION:
+      ide_source_view_set_interactive_completion (self, g_value_get_boolean (value));
       break;
 
     case PROP_OVERWRITE:
@@ -5717,8 +5598,8 @@ ide_source_view_set_property (GObject      *object,
       ide_source_view_set_show_line_numbers (self, g_value_get_boolean (value));
       break;
 
-    case PROP_SNIPPET_COMPLETION:
-      ide_source_view_set_snippet_completion (self, g_value_get_boolean (value));
+    case PROP_SHOW_RELATIVE_LINE_NUMBERS:
+      ide_source_view_set_show_relative_line_numbers (self, g_value_get_boolean (value));
       break;
 
     case PROP_OVERSCROLL:
@@ -5736,8 +5617,8 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
   GtkWidgetClass *widget_class = GTK_WIDGET_CLASS (klass);
   GtkTextViewClass *text_view_class = GTK_TEXT_VIEW_CLASS (klass);
+  GtkSourceViewClass *gsv_class = GTK_SOURCE_VIEW_CLASS (klass);
   GtkBindingSet *binding_set;
-  GTypeClass *completion_class;
 
   object_class->constructed = ide_source_view_constructed;
   object_class->dispose = ide_source_view_dispose;
@@ -5752,27 +5633,29 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
   widget_class->focus_out_event = ide_source_view_focus_out_event;
   widget_class->key_press_event = ide_source_view_key_press_event;
   widget_class->key_release_event = ide_source_view_key_release_event;
-  widget_class->query_tooltip = ide_source_view_query_tooltip;
   widget_class->scroll_event = ide_source_view_scroll_event;
   widget_class->size_allocate = ide_source_view_size_allocate;
   widget_class->style_updated = ide_source_view_real_style_updated;
+  widget_class->destroy = ide_source_view_destroy;
 
   text_view_class->delete_from_cursor = ide_source_view_real_delete_from_cursor;
   text_view_class->draw_layer = ide_source_view_real_draw_layer;
   text_view_class->insert_at_cursor = ide_source_view_real_insert_at_cursor;
   text_view_class->populate_popup = ide_source_view_real_populate_popup;
 
+  gsv_class->undo = ide_source_view_real_undo;
+
   klass->add_cursor = ide_source_view_real_add_cursor;
   klass->remove_cursors = ide_source_view_real_remove_cursors;
   klass->append_to_count = ide_source_view_real_append_to_count;
   klass->begin_macro = ide_source_view_real_begin_macro;
-  klass->begin_word_completion = ide_source_view_real_begin_word_completion;
   klass->begin_rename = ide_source_view_real_begin_rename;
   klass->capture_modifier = ide_source_view_real_capture_modifier;
   klass->clear_count = ide_source_view_real_clear_count;
   klass->clear_modifier = ide_source_view_real_clear_modifier;
   klass->clear_selection = ide_source_view_real_clear_selection;
   klass->clear_snippets = ide_source_view_clear_snippets;
+  klass->copy_clipboard_extended = ide_source_view_real_copy_clipboard_extended;
   klass->cycle_completion = ide_source_view_real_cycle_completion;
   klass->decrease_font_size = ide_source_view_real_decrease_font_size;
   klass->delete_selection = ide_source_view_real_delete_selection;
@@ -5805,6 +5688,13 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
 
   g_object_class_override_property (object_class, PROP_AUTO_INDENT, "auto-indent");
 
+  properties [PROP_COMPLETION_N_ROWS] =
+    g_param_spec_uint ("completion-n-rows",
+                       "Completion N Rows",
+                       "The number of completion rows to display to the user",
+                       1, 32, 5,
+                       (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
   properties [PROP_COUNT] =
     g_param_spec_int ("count",
                       "Count",
@@ -5827,13 +5717,6 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
                         "The Pango font description to use for rendering source.",
                         PANGO_TYPE_FONT_DESCRIPTION,
                         (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
-
-  properties [PROP_ENABLE_WORD_COMPLETION] =
-    g_param_spec_boolean ("enable-word-completion",
-                          "Enable Word Completion",
-                          "If words from all buffers can be used to autocomplete.",
-                          FALSE,
-                          (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   properties [PROP_FONT_NAME] =
     g_param_spec_string ("font-name",
@@ -5860,6 +5743,13 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
                        IDE_TYPE_INDENT_STYLE,
                        IDE_INDENT_STYLE_TABS,
                        (G_PARAM_WRITABLE | G_PARAM_STATIC_STRINGS));
+
+  properties [PROP_INTERACTIVE_COMPLETION] =
+    g_param_spec_boolean ("interactive-completion",
+                          "Interactive Completion",
+                          "If completion should be completed interactively",
+                          TRUE,
+                          (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   properties [PROP_INSERT_MATCHING_BRACE] =
     g_param_spec_boolean ("insert-matching-brace",
@@ -5914,6 +5804,8 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
    *
    * This also requires that IdeBuffer:highlight-diagnostics is set to %TRUE
    * to generate diagnostics.
+   *
+   * Since: 3.32
    */
   properties [PROP_SHOW_LINE_DIAGNOSTICS] =
     g_param_spec_boolean ("show-line-diagnostics",
@@ -5924,10 +5816,10 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
 
   g_object_class_override_property (object_class, PROP_SHOW_LINE_NUMBERS, "show-line-numbers");
 
-  properties [PROP_SNIPPET_COMPLETION] =
-    g_param_spec_boolean ("snippet-completion",
-                          "Snippet Completion",
-                          "If snippet expansion should be enabled via the completion window.",
+  properties [PROP_SHOW_RELATIVE_LINE_NUMBERS] =
+    g_param_spec_boolean ("show-relative-line-numbers",
+                          "Show Relative Line Numbers",
+                          "Show line numbers relative to the cursor line",
                           FALSE,
                           (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
@@ -5974,6 +5866,8 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
    * to replay the sequence starting from the correct state.
    *
    * Pair this with an emission of #IdeSourceView::end-macro to complete the sequence.
+   *
+   * Since: 3.32
    */
   signals [BEGIN_MACRO] =
     g_signal_new ("begin-macro",
@@ -5991,6 +5885,8 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
    * operation using the #IdeRenameProvider from the underlying buffer. The
    * cursor position will be used as the location when sending the request to
    * the provider.
+   *
+   * Since: 3.32
    */
   signals [BEGIN_RENAME] =
     g_signal_new ("begin-rename",
@@ -5998,23 +5894,6 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
                   G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION,
                   G_STRUCT_OFFSET (IdeSourceViewClass, begin_rename),
                   NULL, NULL, NULL, G_TYPE_NONE, 0);
-
- /**
-   * IdeSourceView::begin-word-completion:
-   * @self: An #IdeSourceView
-   * @direction: the direction (1 for forward or -1 for backwards)
-   *
-   * This signal is emitted when the user requests word completion with
-   * sorting by distance from the cursor. 1 for forward search, -1 for
-   * backwards search.
-   */
-  signals [BEGIN_WORD_COMPLETION] =
-    g_signal_new ("begin-word-completion",
-                  G_TYPE_FROM_CLASS (klass),
-                  G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION,
-                  G_STRUCT_OFFSET (IdeSourceViewClass, begin_word_completion),
-                  NULL, NULL, NULL,
-                  G_TYPE_NONE, 1, G_TYPE_INT);
 
   signals [BEGIN_USER_ACTION] =
     g_signal_new_class_handler ("begin-user-action",
@@ -6055,6 +5934,8 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
    * Pressing Escape or unfocusing the widget will break from this loop.
    *
    * Use of this signal is not recommended except in very specific cases.
+   *
+   * Since: 3.32
    */
   signals [CAPTURE_MODIFIER] =
     g_signal_new ("capture-modifier",
@@ -6114,6 +5995,15 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
                   G_TYPE_NONE,
                   0);
 
+  signals [COPY_CLIPBOARD_EXTENDED] =
+    g_signal_new ("copy-clipboard-extended",
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION,
+                  G_STRUCT_OFFSET (IdeSourceViewClass, copy_clipboard_extended),
+                  NULL, NULL, NULL,
+                  G_TYPE_NONE,
+                  0);
+
   signals [CYCLE_COMPLETION] =
     g_signal_new ("cycle-completion",
                   G_TYPE_FROM_CLASS (klass),
@@ -6123,21 +6013,6 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
                   G_TYPE_NONE,
                   1,
                   GTK_TYPE_DIRECTION_TYPE);
-
-  /**
-   * IdeSourceView:documentation-requested:
-   * @self: an #IdeSourceView
-   * @word: the word that was requested
-   *
-   * This is emitted by the default request-documentation handler to
-   * locate the documentation for the currently selected word.
-   */
-  signals [DOCUMENTATION_REQUESTED] =
-    g_signal_new ("documentation-requested",
-                  G_TYPE_FROM_CLASS (klass),
-                  G_SIGNAL_RUN_LAST,
-                  0, NULL, NULL, NULL,
-                  G_TYPE_NONE, 1, G_TYPE_STRING);
 
   signals [DECREASE_FONT_SIZE] =
     g_signal_new ("decrease-font-size",
@@ -6179,6 +6054,8 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
    * Complete a macro recording sequence. This may be called more times than is necessary,
    * since #IdeSourceView will only keep the most recent macro recording. This can be
    * helpful when implementing recording sequences such as in Vim.
+   *
+   * Since: 3.32
    */
   signals [END_MACRO] =
     g_signal_new ("end-macro",
@@ -6213,7 +6090,7 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
                   NULL, NULL, NULL,
                   G_TYPE_NONE,
                   1,
-                  IDE_TYPE_SOURCE_LOCATION);
+                  IDE_TYPE_LOCATION);
 
   signals [FORMAT_SELECTION] =
     g_signal_new_class_handler ("format-selection",
@@ -6267,6 +6144,8 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
    * Inserts the current modifier character at the insert mark in the buffer.
    * If @use_count is %TRUE, then the character will be inserted
    * #IdeSourceView:count times.
+   *
+   * Since: 3.32
    */
   signals [INSERT_MODIFIER] =
     g_signal_new ("insert-modifier",
@@ -6312,6 +6191,8 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
    * @dir: The direction to move.
    *
    * Moves to the next search result either forwards or backwards.
+   *
+   * Since: 3.32
    */
   signals [MOVE_ERROR] =
     g_signal_new ("move-error",
@@ -6355,6 +6236,8 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
    *
    * Reselects a previousl selected range of text that was saved using
    * IdeSourceView::push-selection.
+   *
+   * Since: 3.32
    */
   signals [POP_SELECTION] =
     g_signal_new ("pop-selection",
@@ -6368,9 +6251,11 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
   /**
    * IdeSourceView::pop-snippet:
    * @self: An #IdeSourceView
-   * @snippet: An #IdeSourceSnippet.
+   * @snippet: An #IdeSnippet.
    *
    * Pops the current snippet from the sourceview if there is one.
+   *
+   * Since: 3.32
    */
   signals [POP_SNIPPET] =
     g_signal_new_class_handler ("pop-snippet",
@@ -6387,6 +6272,8 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
    * Saves the current selection away to be restored by a call to
    * IdeSourceView::pop-selection. You must pop the selection to keep
    * the selection stack in consistent order.
+   *
+   * Since: 3.32
    */
   signals [PUSH_SELECTION] =
     g_signal_new ("push-selection",
@@ -6400,11 +6287,13 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
   /**
    * IdeSourceView::push-snippet:
    * @self: An #IdeSourceView
-   * @snippet: An #IdeSourceSnippet.
+   * @snippet: An #IdeSnippet.
    * @iter: (allow-none): The location for the snippet, or %NULL.
    *
    * Pushes @snippet onto the snippet stack at either @iter or the insertion
    * mark if @iter is not provided.
+   *
+   * Since: 3.32
    */
   signals [PUSH_SNIPPET] =
     g_signal_new_class_handler ("push-snippet",
@@ -6414,7 +6303,7 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
                                 NULL, NULL, NULL,
                                 G_TYPE_NONE,
                                 2,
-                                IDE_TYPE_SOURCE_SNIPPET,
+                                IDE_TYPE_SNIPPET,
                                 GTK_TYPE_TEXT_ITER | G_SIGNAL_TYPE_STATIC_SCOPE);
 
   signals [REBUILD_HIGHLIGHT] =
@@ -6450,6 +6339,8 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
    *
    * Replays the last series of captured events that were captured between calls
    * to #IdeSourceView::begin-macro and #IdeSourceView::end-macro.
+   *
+   * Since: 3.32
    */
   signals [REPLAY_MACRO] =
     g_signal_new ("replay-macro",
@@ -6477,7 +6368,7 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
    * and various stateful settings of the sourceview. This is a good
    * signal to map to the "Escape" key.
    *
-   * Since: 3.26
+   * Since: 3.32
    */
   signals [RESET] =
     g_signal_new_class_handler ("reset",
@@ -6590,6 +6481,8 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
    *
    * This signal is meant to be activated from keybindings to sort the currently selected lines.
    * The lines are sorted using qsort() and either strcmp() or strcasecmp().
+   *
+   * Since: 3.32
    */
   signals [SORT] =
     g_signal_new ("sort",
@@ -6666,37 +6559,27 @@ ide_source_view_class_init (IdeSourceViewClass *klass)
   binding_set = gtk_binding_set_by_class (g_type_class_peek (GTK_TYPE_TEXT_VIEW));
   gtk_binding_entry_remove (binding_set, GDK_KEY_period, GDK_CONTROL_MASK);
   gtk_binding_entry_remove (binding_set, GDK_KEY_semicolon, GDK_CONTROL_MASK);
-
-  /*
-   * Escape is wired up by the GtkSourceCompletion by default. However, some
-   * keybindings may want to control that manually (such as Vim). Vim needs to
-   * go back to normal mode upon Escape to more closely match the traditional
-   * environment.
-   *
-   * We remove the Tab activation from the completion class so that we can
-   * activate it ourselves. Otherwise, it might fire before we have a chance
-   * to steal it to move to the next completion item.
-   */
-  completion_class = g_type_class_ref (GTK_SOURCE_TYPE_COMPLETION);
-  binding_set = gtk_binding_set_by_class (completion_class);
-  gtk_binding_entry_remove (binding_set, GDK_KEY_Escape, 0);
-  gtk_binding_entry_remove (binding_set, GDK_KEY_Tab, 0);
-  g_type_class_unref (completion_class);
 }
 
 static void
 ide_source_view_init (IdeSourceView *self)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  GtkSourceCompletion *completion;
+
+  DZL_COUNTER_INC (instances);
+
+  gtk_widget_add_events (GTK_WIDGET (self), GDK_ENTER_NOTIFY_MASK);
+  gtk_widget_set_has_tooltip (GTK_WIDGET (self), FALSE);
 
   priv->include_regex = g_regex_new (INCLUDE_STATEMENTS,
                                      G_REGEX_OPTIMIZE,
                                      0,
                                      NULL);
 
-  DZL_COUNTER_INC (instances);
-
+  priv->show_line_numbers = TRUE;
+  priv->show_line_changes = TRUE;
+  priv->show_line_diagnostics = TRUE;
+  priv->interactive_completion = TRUE;
   priv->target_line_column = 0;
   priv->snippets = g_queue_new ();
   priv->selections = g_queue_new ();
@@ -6704,21 +6587,11 @@ ide_source_view_init (IdeSourceView *self)
   priv->command_str = g_string_sized_new (32);
   priv->overscroll_num_lines = DEFAULT_OVERSCROLL_NUM_LINES;
 
-  priv->completion_providers_signals = dzl_signal_group_new (IDE_TYPE_EXTENSION_SET_ADAPTER);
-
-  dzl_signal_group_connect_object (priv->completion_providers_signals,
-                                   "extension-added",
-                                   G_CALLBACK (ide_source_view__completion_provider_added),
-                                   self,
-                                   0);
-
-  dzl_signal_group_connect_object (priv->completion_providers_signals,
-                                   "extension-removed",
-                                   G_CALLBACK (ide_source_view__completion_provider_removed),
-                                   self,
-                                   0);
+  priv->hover = _ide_hover_new (self);
 
   priv->file_setting_bindings = dzl_binding_group_new ();
+  dzl_binding_group_bind (priv->file_setting_bindings, "auto-indent",
+                          self, "auto-indent", G_BINDING_SYNC_CREATE);
   dzl_binding_group_bind (priv->file_setting_bindings, "indent-width",
                           self, "indent-width", G_BINDING_SYNC_CREATE);
   dzl_binding_group_bind (priv->file_setting_bindings, "tab-width",
@@ -6742,6 +6615,11 @@ ide_source_view_init (IdeSourceView *self)
                                    self,
                                    G_CONNECT_SWAPPED);
   dzl_signal_group_connect_object (priv->buffer_signals,
+                                   "request-scroll-to-insert",
+                                   G_CALLBACK (ide_source_view__buffer_request_scroll_to_insert_cb),
+                                   self,
+                                   G_CONNECT_SWAPPED);
+  dzl_signal_group_connect_object (priv->buffer_signals,
                                    "line-flags-changed",
                                    G_CALLBACK (ide_source_view__buffer_line_flags_changed_cb),
                                    self,
@@ -6757,8 +6635,8 @@ ide_source_view_init (IdeSourceView *self)
                                    self,
                                    G_CONNECT_SWAPPED);
   dzl_signal_group_connect_object (priv->buffer_signals,
-                                   "notify::file",
-                                   G_CALLBACK (ide_source_view__buffer_notify_file_cb),
+                                   "notify::file-settings",
+                                   G_CALLBACK (ide_source_view__buffer_notify_file_settings_cb),
                                    self,
                                    G_CONNECT_SWAPPED);
   dzl_signal_group_connect_object (priv->buffer_signals,
@@ -6820,14 +6698,6 @@ ide_source_view_init (IdeSourceView *self)
   g_object_bind_property_full (self, "buffer", priv->buffer_signals, "target", 0,
                                ignore_invalid_buffers, NULL, NULL, NULL);
 
-  /*
-   * We block completion when we are not focused so that two SourceViews
-   * viewing the same GtkTextBuffer do not both show completion
-   * windows.
-   */
-  completion = gtk_source_view_get_completion (GTK_SOURCE_VIEW (self));
-  gtk_source_completion_block_interactive (completion);
-
   dzl_widget_action_group_attach (self, "sourceview");
 }
 
@@ -6849,6 +6719,8 @@ ide_source_view_get_font_desc (IdeSourceView *self)
  * account. You must free the result with pango_font_description_free().
  *
  * Returns: (transfer full): a #PangoFontDescription
+ *
+ * Since: 3.32
  */
 PangoFontDescription *
 ide_source_view_get_scaled_font_desc (IdeSourceView *self)
@@ -6913,7 +6785,7 @@ ide_source_view_get_show_line_changes (IdeSourceView *self)
 
   g_return_val_if_fail (IDE_IS_SOURCE_VIEW (self), FALSE);
 
-  return ide_omni_gutter_renderer_get_show_line_changes (priv->omni_renderer);
+  return priv->show_line_changes;
 }
 
 void
@@ -6924,8 +6796,13 @@ ide_source_view_set_show_line_changes (IdeSourceView *self,
 
   g_return_if_fail (IDE_IS_SOURCE_VIEW (self));
 
-  ide_omni_gutter_renderer_set_show_line_changes (priv->omni_renderer, show_line_changes);
-  g_object_notify_by_pspec (G_OBJECT (self), properties [PROP_SHOW_LINE_CHANGES]);
+  priv->show_line_changes = !!show_line_changes;
+
+  if (priv->gutter)
+    {
+      ide_gutter_set_show_line_changes (priv->gutter, show_line_changes);
+      g_object_notify_by_pspec (G_OBJECT (self), properties [PROP_SHOW_LINE_CHANGES]);
+    }
 }
 
 gboolean
@@ -6935,7 +6812,7 @@ ide_source_view_get_show_line_diagnostics (IdeSourceView *self)
 
   g_return_val_if_fail (IDE_IS_SOURCE_VIEW (self), FALSE);
 
-  return ide_omni_gutter_renderer_get_show_line_diagnostics (priv->omni_renderer);
+  return priv->show_line_diagnostics;
 }
 
 void
@@ -6946,8 +6823,13 @@ ide_source_view_set_show_line_diagnostics (IdeSourceView *self,
 
   g_return_if_fail (IDE_IS_SOURCE_VIEW (self));
 
-  ide_omni_gutter_renderer_set_show_line_diagnostics (priv->omni_renderer, show_line_diagnostics);
-  g_object_notify_by_pspec (G_OBJECT (self), properties [PROP_SHOW_LINE_DIAGNOSTICS]);
+  priv->show_line_diagnostics = !!show_line_diagnostics;
+
+  if (priv->gutter)
+    {
+      ide_gutter_set_show_line_diagnostics (priv->gutter, show_line_diagnostics);
+      g_object_notify_by_pspec (G_OBJECT (self), properties [PROP_SHOW_LINE_DIAGNOSTICS]);
+    }
 }
 
 gboolean
@@ -7097,19 +6979,27 @@ void
 ide_source_view_pop_snippet (IdeSourceView *self)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  IdeSourceSnippet *snippet;
+  IdeSnippet *snippet;
 
   g_return_if_fail (IDE_IS_SOURCE_VIEW (self));
 
   if ((snippet = g_queue_pop_head (priv->snippets)))
     {
-      ide_source_snippet_finish (snippet);
+      g_autofree gchar *new_text = NULL;
+
+      new_text = ide_snippet_get_full_text (snippet);
+
+      ide_snippet_finish (snippet);
       g_signal_emit (self, signals [POP_SNIPPET], 0, snippet);
       g_object_unref (snippet);
-    }
 
-  if ((snippet = g_queue_peek_head (priv->snippets)))
-    ide_source_snippet_unpause (snippet);
+      if ((snippet = g_queue_peek_head (priv->snippets)))
+        {
+          ide_snippet_replace_current_chunk_text (snippet, new_text);
+          ide_snippet_unpause (snippet);
+          ide_snippet_move_next (snippet);
+        }
+    }
 
   ide_source_view_invalidate_window (self);
 }
@@ -7128,19 +7018,21 @@ ide_source_view_clear_snippets (IdeSourceView *self)
 /**
  * ide_source_view_push_snippet:
  * @self: An #IdeSourceView
- * @snippet: An #IdeSourceSnippet.
+ * @snippet: An #IdeSnippet.
  * @location: (allow-none): A location for the snippet or %NULL.
  *
  * Pushes a new snippet onto the source view.
+ *
+ * Since: 3.32
  */
 void
 ide_source_view_push_snippet (IdeSourceView     *self,
-                              IdeSourceSnippet  *snippet,
+                              IdeSnippet  *snippet,
                               const GtkTextIter *location)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-  IdeSourceSnippetContext *context;
-  IdeSourceSnippet *previous;
+  IdeSnippetContext *context;
+  IdeSnippet *previous;
   GtkTextBuffer *buffer;
   GtkTextIter iter;
   gboolean has_more_tab_stops;
@@ -7149,12 +7041,12 @@ ide_source_view_push_snippet (IdeSourceView     *self,
   guint tab_width;
 
   g_return_if_fail (IDE_IS_SOURCE_VIEW (self));
-  g_return_if_fail (IDE_IS_SOURCE_SNIPPET (snippet));
+  g_return_if_fail (IDE_IS_SNIPPET (snippet));
   g_return_if_fail (!location ||
                     (gtk_text_iter_get_buffer (location) == (void*)priv->buffer));
 
   if ((previous = g_queue_peek_head (priv->snippets)))
-    ide_source_snippet_pause (previous);
+    ide_snippet_pause (previous);
 
   g_queue_push_head (priv->snippets, g_object_ref (snippet));
 
@@ -7165,23 +7057,23 @@ ide_source_view_push_snippet (IdeSourceView     *self,
   else
     gtk_text_buffer_get_iter_at_mark (buffer, &iter, gtk_text_buffer_get_insert (buffer));
 
-  context = ide_source_snippet_get_context (snippet);
+  context = ide_snippet_get_context (snippet);
 
   insert_spaces = gtk_source_view_get_insert_spaces_instead_of_tabs (GTK_SOURCE_VIEW (self));
-  ide_source_snippet_context_set_use_spaces (context, insert_spaces);
+  ide_snippet_context_set_use_spaces (context, insert_spaces);
 
   tab_width = gtk_source_view_get_tab_width (GTK_SOURCE_VIEW (self));
-  ide_source_snippet_context_set_tab_width (context, tab_width);
+  ide_snippet_context_set_tab_width (context, tab_width);
 
   line_prefix = text_iter_get_line_prefix (&iter);
-  ide_source_snippet_context_set_line_prefix (context, line_prefix);
+  ide_snippet_context_set_line_prefix (context, line_prefix);
   g_free (line_prefix);
 
   g_signal_emit (self, signals [PUSH_SNIPPET], 0, snippet, &iter);
 
   gtk_text_buffer_begin_user_action (buffer);
   ide_source_view_block_handlers (self);
-  has_more_tab_stops = ide_source_snippet_begin (snippet, buffer, &iter);
+  has_more_tab_stops = ide_snippet_begin (snippet, buffer, &iter);
   ide_source_view_scroll_to_insert (self);
   ide_source_view_unblock_handlers (self);
   gtk_text_buffer_end_user_action (buffer);
@@ -7191,8 +7083,8 @@ ide_source_view_push_snippet (IdeSourceView     *self,
       GtkTextMark *mark_begin;
       GtkTextMark *mark_end;
 
-      mark_begin = ide_source_snippet_get_mark_begin (snippet);
-      mark_end = ide_source_snippet_get_mark_end (snippet);
+      mark_begin = ide_snippet_get_mark_begin (snippet);
+      mark_end = ide_snippet_get_mark_end (snippet);
 
       if (mark_begin != NULL && mark_end != NULL)
         {
@@ -7223,71 +7115,6 @@ ide_source_view_push_snippet (IdeSourceView     *self,
   ide_source_view_invalidate_window (self);
 }
 
-/**
- * ide_source_view_get_snippet_completion:
- *
- * Gets the #IdeSourceView:snippet-completion property.
- *
- * If enabled, snippet expansion can be performed via the auto completion drop down.
- */
-gboolean
-ide_source_view_get_snippet_completion (IdeSourceView *self)
-{
-  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-
-  g_return_val_if_fail (IDE_IS_SOURCE_VIEW (self), FALSE);
-
-  return priv->snippet_completion;
-}
-
-/**
- * ide_source_view_set_snippet_completion:
- *
- * Sets the #IdeSourceView:snippet-completion property. By setting this property to %TRUE,
- * snippets will be loaded for the currently activated source code language. See #IdeSourceSnippet
- * for more information on what can be provided via a snippet.
- *
- * See also: ide_source_view_get_snippet_completion()
- */
-void
-ide_source_view_set_snippet_completion (IdeSourceView *self,
-                                        gboolean       snippet_completion)
-{
-  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-
-  g_return_if_fail (IDE_IS_SOURCE_VIEW (self));
-
-  snippet_completion = !!snippet_completion;
-
-  if (snippet_completion != priv->snippet_completion)
-    {
-      GtkSourceCompletion *completion;
-
-      priv->snippet_completion = snippet_completion;
-
-      completion = gtk_source_view_get_completion (GTK_SOURCE_VIEW (self));
-
-      if (snippet_completion)
-        {
-          if (!priv->snippets_provider)
-            {
-              priv->snippets_provider = g_object_new (IDE_TYPE_SOURCE_SNIPPET_COMPLETION_PROVIDER,
-                                                      "source-view", self,
-                                                      NULL);
-              ide_source_view_reload_snippets (self);
-            }
-
-          gtk_source_completion_add_provider (completion, priv->snippets_provider, NULL);
-        }
-      else
-        {
-          gtk_source_completion_remove_provider (completion, priv->snippets_provider, NULL);
-        }
-
-      g_object_notify_by_pspec (G_OBJECT (self), properties [PROP_SNIPPET_COMPLETION]);
-    }
-}
-
 void
 ide_source_view_jump (IdeSourceView     *self,
                       const GtkTextIter *from,
@@ -7300,7 +7127,7 @@ ide_source_view_jump (IdeSourceView     *self,
   g_return_if_fail (IDE_IS_SOURCE_VIEW (self));
 
   if (priv->buffer != NULL &&
-      !_ide_buffer_get_loading (priv->buffer))
+      !ide_buffer_get_loading (priv->buffer))
     {
       GtkTextIter dummy_from;
       GtkTextIter dummy_to;
@@ -7332,6 +7159,8 @@ ide_source_view_jump (IdeSourceView     *self,
  * Gets the #IdeSourceView:scroll-offset property. This property contains the number of lines
  * that should be kept above or below the line containing the insertion cursor relative to the
  * top and bottom of the visible text window.
+ *
+ * Since: 3.32
  */
 guint
 ide_source_view_get_scroll_offset (IdeSourceView *self)
@@ -7348,6 +7177,8 @@ ide_source_view_get_scroll_offset (IdeSourceView *self)
  *
  * Sets the #IdeSourceView:scroll-offset property. See ide_source_view_get_scroll_offset() for
  * more information. Set to 0 to unset this property.
+ *
+ * Since: 3.32
  */
 void
 ide_source_view_set_scroll_offset (IdeSourceView *self,
@@ -7373,6 +7204,8 @@ ide_source_view_set_scroll_offset (IdeSourceView *self,
  * is similar to gtk_text_view_get_visible_area() except that it takes into account the
  * #IdeSourceView:scroll-offset property to ensure there is space above and below the
  * visible_rect.
+ *
+ * Since: 3.32
  */
 void
 ide_source_view_get_visible_rect (IdeSourceView *self,
@@ -7478,7 +7311,7 @@ ide_source_view_move_mark_onscreen (IdeSourceView *self,
   gtk_text_view_get_iter_location (text_view, &iter, &iter_rect);
 
   if (_GDK_RECTANGLE_CONTAINS (&visible_rect, &iter_rect))
-    return FALSE;
+    IDE_RETURN (FALSE);
 
   if (_GDK_RECTANGLE_Y2 (&iter_rect) > _GDK_RECTANGLE_Y2 (&visible_rect))
     gtk_text_view_get_iter_at_location (text_view, &iter,
@@ -7491,7 +7324,7 @@ ide_source_view_move_mark_onscreen (IdeSourceView *self,
 
   gtk_text_buffer_move_mark (buffer, mark, &iter);
 
-  return TRUE;
+  IDE_RETURN (TRUE);
 }
 
 static gboolean
@@ -7726,7 +7559,7 @@ ide_source_view_scroll_to_iter (IdeSourceView        *self,
       if (priv->hadj_animation != NULL)
         {
           dzl_animation_stop (priv->hadj_animation);
-          dzl_clear_weak_pointer (&priv->hadj_animation);
+          g_clear_weak_pointer (&priv->hadj_animation);
         }
 
       priv->hadj_animation =
@@ -7742,7 +7575,7 @@ ide_source_view_scroll_to_iter (IdeSourceView        *self,
       if (priv->vadj_animation != NULL)
         {
           dzl_animation_stop (priv->vadj_animation);
-          dzl_clear_weak_pointer (&priv->vadj_animation);
+          g_clear_weak_pointer (&priv->vadj_animation);
         }
 
       priv->vadj_animation =
@@ -7825,34 +7658,6 @@ ide_source_view_place_cursor_onscreen (IdeSourceView *self)
   IDE_RETURN (ret);
 }
 
-gboolean
-ide_source_view_get_enable_word_completion (IdeSourceView *self)
-{
-  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-
-  g_return_val_if_fail (IDE_IS_SOURCE_VIEW (self), FALSE);
-
-  return priv->enable_word_completion;
-}
-
-void
-ide_source_view_set_enable_word_completion (IdeSourceView *self,
-                                            gboolean       enable_word_completion)
-{
-  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
-
-  g_return_if_fail (IDE_IS_SOURCE_VIEW (self));
-
-  enable_word_completion = !!enable_word_completion;
-
-  if (priv->enable_word_completion != enable_word_completion)
-    {
-      priv->enable_word_completion = enable_word_completion;
-      ide_source_view_reload_word_completion (self);
-      g_object_notify_by_pspec (G_OBJECT (self), properties [PROP_ENABLE_WORD_COMPLETION]);
-    }
-}
-
 /**
  * ide_source_view_get_file_settings:
  * @self: an #IdeSourceView.
@@ -7862,6 +7667,8 @@ ide_source_view_set_enable_word_completion (IdeSourceView *self,
  * such as spaces vs tabs.
  *
  * Returns: (transfer none) (nullable): An #IdeFileSettings or %NULL.
+ *
+ * Since: 3.32
  */
 IdeFileSettings *
 ide_source_view_get_file_settings (IdeSourceView *self)
@@ -7992,9 +7799,11 @@ _ide_source_view_get_scroll_mark (IdeSourceView *self)
  *
  * Gets the current snippet if there is one, otherwise %NULL.
  *
- * Returns: (transfer none) (nullable): An #IdeSourceSnippet or %NULL.
+ * Returns: (transfer none) (nullable): An #IdeSnippet or %NULL.
+ *
+ * Since: 3.32
  */
-IdeSourceSnippet *
+IdeSnippet *
 ide_source_view_get_current_snippet (IdeSourceView *self)
 {
   IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
@@ -8011,7 +7820,7 @@ ide_source_view_get_show_line_numbers (IdeSourceView *self)
 
   g_return_val_if_fail (IDE_IS_SOURCE_VIEW (self), FALSE);
 
-  return ide_omni_gutter_renderer_get_show_line_numbers (priv->omni_renderer);
+  return priv->show_line_numbers;
 }
 
 void
@@ -8022,6 +7831,153 @@ ide_source_view_set_show_line_numbers (IdeSourceView *self,
 
   g_return_if_fail (IDE_IS_SOURCE_VIEW (self));
 
-  ide_omni_gutter_renderer_set_show_line_numbers (priv->omni_renderer, show_line_numbers);
+  priv->show_line_numbers = !!show_line_numbers;
+
+  if (priv->gutter)
+    {
+      ide_gutter_set_show_line_numbers (priv->gutter, show_line_numbers);
+      g_object_notify (G_OBJECT (self), "show-line-numbers");
+    }
+}
+
+gboolean
+ide_source_view_get_show_relative_line_numbers (IdeSourceView *self)
+{
+  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
+
+  g_return_val_if_fail (IDE_IS_SOURCE_VIEW (self), FALSE);
+
+  return priv->show_relative_line_numbers;
+}
+
+void
+ide_source_view_set_show_relative_line_numbers (IdeSourceView *self,
+                                                gboolean       show_relative_line_numbers)
+{
+  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
+
+  g_return_if_fail (IDE_IS_SOURCE_VIEW (self));
+
+  priv->show_relative_line_numbers = !!show_relative_line_numbers;
+
+  if (priv->gutter)
+    {
+      ide_gutter_set_show_relative_line_numbers (priv->gutter, show_relative_line_numbers);
+      g_object_notify (G_OBJECT (self), "show-relative-line-numbers");
+    }
+}
+
+gboolean
+ide_source_view_is_processing_key (IdeSourceView *self)
+{
+  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
+
+  g_return_val_if_fail (IDE_IS_SOURCE_VIEW (self), FALSE);
+
+  return priv->in_key_press > 0;
+}
+
+/**
+ * ide_source_view_get_completion:
+ * @self: a #IdeSourceView
+ *
+ * Get the completion for the #IdeSourceView
+ *
+ * Returns: (transfer none): an #IdeCompletion
+ *
+ * Since: 3.32
+ */
+IdeCompletion *
+ide_source_view_get_completion (IdeSourceView *self)
+{
+  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
+
+  g_return_val_if_fail (IDE_IS_SOURCE_VIEW (self), NULL);
+
+  return priv->completion;
+}
+
+/**
+ * ide_source_view_has_snippet:
+ * @self: a #IdeSourceView
+ *
+ * Checks if there is an active snippet.
+ *
+ * Returns: %TRUE if there is an active snippet.
+ *
+ * Since: 3.32
+ */
+gboolean
+ide_source_view_has_snippet (IdeSourceView *self)
+{
+  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
+
+  g_return_val_if_fail (IDE_IS_SOURCE_VIEW (self), FALSE);
+
+  return priv->snippets->length > 0;
+}
+
+/**
+ * ide_source_view_set_gutter:
+ * @self: a #IdeSourceView
+ * @gutter: an #IdeGutter
+ *
+ * Allows setting the gutter for the sourceview.
+ *
+ * Generally, this will always be #IdeOmniGutterRenderer. However, to avoid
+ * circular dependencies, an interface is used to allow plugins to set
+ * this object.
+ *
+ * Since: 3.32
+ */
+void
+ide_source_view_set_gutter (IdeSourceView *self,
+                            IdeGutter     *gutter)
+{
+  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
+  GtkSourceGutter *left_gutter;
+
+  g_return_if_fail (IDE_IS_SOURCE_VIEW (self));
+  g_return_if_fail (!gutter || IDE_IS_GUTTER (gutter));
+  g_return_if_fail (!gutter || GTK_SOURCE_IS_GUTTER_RENDERER (gutter));
+
+  if (gutter == priv->gutter)
+    return;
+
+  left_gutter = gtk_source_view_get_gutter (GTK_SOURCE_VIEW (self),
+                                            GTK_TEXT_WINDOW_LEFT);
+
+  if (priv->gutter)
+    {
+      gtk_source_gutter_remove (left_gutter, GTK_SOURCE_GUTTER_RENDERER (priv->gutter));
+      g_clear_object (&priv->gutter);
+    }
+
+  if (gutter)
+    {
+      priv->gutter = g_object_ref_sink (gutter);
+      gtk_source_gutter_insert (left_gutter,
+                                GTK_SOURCE_GUTTER_RENDERER (gutter),
+                                0);
+      ide_gutter_set_show_line_numbers (priv->gutter, priv->show_line_numbers);
+      ide_gutter_set_show_relative_line_numbers (priv->gutter, priv->show_relative_line_numbers);
+      ide_gutter_set_show_line_changes (priv->gutter, priv->show_line_changes);
+      ide_gutter_set_show_line_diagnostics (priv->gutter, priv->show_line_diagnostics);
+      ide_gutter_style_changed (gutter);
+    }
+
+  g_object_notify (G_OBJECT (self), "show-line-changes");
+  g_object_notify (G_OBJECT (self), "show-line-diagnostics");
   g_object_notify (G_OBJECT (self), "show-line-numbers");
+  g_object_notify (G_OBJECT (self), "show-relative-line-numbers");
+}
+
+gboolean
+_ide_source_view_has_cursors (IdeSourceView *self)
+{
+  IdeSourceViewPrivate *priv = ide_source_view_get_instance_private (self);
+
+  g_return_val_if_fail (IDE_IS_SOURCE_VIEW (self), FALSE);
+
+  return priv->cursor != NULL && ide_cursor_is_enabled (priv->cursor);
 }

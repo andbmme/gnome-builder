@@ -3,8 +3,8 @@
 #
 # jedi_plugin.py
 #
-# Copyright © 2015 Elad Alfassa <elad@fedoraproject.org>
-# Copyright © 2015 Christian Hergert <chris@dronelabs.com>
+# Copyright 2015 Elad Alfassa <elad@fedoraproject.org>
+# Copyright 2015-2019 Christian Hergert <chris@dronelabs.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -35,11 +35,6 @@ import os.path
 import sqlite3
 import threading
 
-gi.require_version('GIRepository', '2.0')
-gi.require_version('Gtk', '3.0')
-gi.require_version('GtkSource', '3.0')
-gi.require_version('Ide', '1.0')
-
 from collections import OrderedDict
 
 from gi.importer import DynamicImporter
@@ -55,6 +50,7 @@ from gi.repository import GtkSource
 from gi.repository import Ide
 from gi.types import GObjectMeta
 from gi.types import StructMeta
+
 _ = Ide.gettext
 
 gi_importer = DynamicImporter('gi.repository')
@@ -87,113 +83,140 @@ _ICONS = {
     _TYPE_MODULE: 'lang-namespace-symbolic',
 }
 
+_PROXY_TASK = None
+
+def return_error(task, error):
+    #print(repr(error))
+    task.return_error(GLib.Error(message=repr(error)))
+
+def patch_jedi():
+    try:
+        from jedi.evaluate.compiled import CompiledObject
+        from jedi.evaluate.compiled import get_special_object
+        try:
+            # 0.12
+            from jedi.evaluate.compiled import create_from_name
+            from jedi.evaluate.base_context import Context
+        except ImportError:
+            # Pre 0.12
+            from jedi.evaluate.compiled import _create_from_name as create_from_name
+            from jedi.evaluate.context import Context
+        from jedi.evaluate.docstrings import _evaluate_for_statement_string
+        from jedi.evaluate.imports import Importer
+
+        class PatchedJediCompiledObject(CompiledObject):
+            "A modified version of Jedi CompiledObject to work with GObject Introspection modules"
+
+            def __init__(self, evaluator, obj, parent_context=None, faked_class=None):
+                # we have to override __init__ to change super(CompiledObject, self)
+                # to Context, in order to prevent an infinite recursion
+                Context.__init__(self, evaluator, parent_context)
+                self.obj = obj
+                self.tree_node = faked_class
+
+            def _cls(self):
+                if self.obj.__class__ == IntrospectionModule:
+                    return self
+                else:
+                    return super()._cls(self)
+
+            @property
+            def py__call__(self):
+                def actual(params):
+                    # Parse the docstring to find the return type:
+                    ret_type = ''
+                    if '->' in self.obj.__doc__:
+                        ret_type = self.obj.__doc__.split('->')[1].strip()
+                        ret_type = ret_type.replace(' or None', '')
+                    if ret_type.startswith('iter:'):
+                        ret_type = ret_type[len('iter:'):]  # we don't care if it's an iterator
+
+                    if hasattr(__builtins__, ret_type):
+                        # The function we're inspecting returns a builtin python type, that's easy
+                        # (see test/test_evaluate/test_compiled.py in the jedi source code for usage)
+                        builtins = get_special_object(self.evaluator, 'BUILTINS')
+                        builtin_obj = builtins.py__getattribute__(ret_type)
+                        obj = _create_from_name(self.evaluator, builtins, builtin_obj, "")
+                        return self.evaluator.execute(obj, params)
+                    else:
+                        # The function we're inspecting returns a GObject type
+                        parent = self.parent_context.obj.__name__
+                        if parent.startswith('gi.repository'):
+                            parent = parent[len('gi.repository.'):]
+                        else:
+                            # a module with overrides, such as Gtk, behaves differently
+                            parent_module = self.parent_context.obj.__module__
+                            if parent_module.startswith('gi.overrides'):
+                                parent_module = parent_module[len('gi.overrides.'):]
+                                parent = '%s.%s' % (parent_module, parent)
+
+                        if ret_type.startswith(parent):
+                            # A pygobject type in the same module
+                            ret_type = ret_type[len(parent):]
+                        else:
+                            # A pygobject type in a different module
+                            return_type_parent = ret_type.split('.', 1)[0]
+                            ret_type = 'from gi.repository import %s\n%s' % (return_type_parent, ret_type)
+                        result = _evaluate_for_statement_string(self.parent_context, ret_type)
+                        return set(result)
+                if type(self.obj) == FunctionInfo:
+                    return actual
+                return super().py__call__
+
+        # we need to override CompiledBoundMethod without changing it much,
+        # just so it'll not get confused due to our overriden CompiledObject
+        class PatchedCompiledBoundMethod(PatchedJediCompiledObject):
+            def __init__(self, func):
+                super().__init__(func.evaluator, func.obj, func.parent_context, func.tree_node)
+
+        class PatchedJediImporter(Importer):
+            "A modified version of Jedi Importer to work with GObject Introspection modules"
+            def follow(self):
+                module_list = super().follow()
+                if not module_list:
+                    import_path = '.'.join([str(i) for i in self.import_path])
+                    if import_path.startswith('gi.repository'):
+                        try:
+                            module = gi_importer.load_module(import_path)
+                            module_list = [PatchedJediCompiledObject(self._evaluator, module)]
+                        except ImportError:
+                            pass
+                return module_list
+
+        try:
+            # Pre 0.12 workaround
+            # TODO: What needs to be fixed here for 0.12?
+            original_jedi_get_module = jedi.evaluate.compiled.fake.get_module
+            def patched_jedi_get_module(obj):
+                "Work around a weird bug in jedi"
+                try:
+                    return original_jedi_get_module(obj)
+                except ImportError as e:
+                    if e.msg == "No module named 'gi._gobject._gobject'":
+                        return original_jedi_get_module('gi._gobject')
+            jedi.evaluate.compiled.fake.get_module = patched_jedi_get_module
+        except:
+            pass
+
+        jedi.evaluate.compiled.CompiledObject = PatchedJediCompiledObject
+        try:
+            jedi.evaluate.instance.CompiledBoundMethod = PatchedCompiledBoundMethod
+        except AttributeError:
+            jedi.evaluate.context.instance.CompiledBoundMethod = PatchedCompiledBoundMethod
+        jedi.evaluate.imports.Importer = PatchedJediImporter
+        return True
+    except ImportError as ex:
+        print("jedi patching not possible. GI completion may not work.")
+        print(ex)
+        return False
+
 try:
     import jedi
-    from jedi.evaluate.compiled import CompiledObject
-    from jedi.evaluate.compiled import get_special_object
-    from jedi.evaluate.compiled import _create_from_name
-    from jedi.evaluate.context import Context
-    from jedi.evaluate.docstrings import _evaluate_for_statement_string
-    from jedi.evaluate.imports import Importer
-
-    class PatchedJediCompiledObject(CompiledObject):
-        "A modified version of Jedi CompiledObject to work with GObject Introspection modules"
-
-        def __init__(self, evaluator, obj, parent_context=None, faked_class=None):
-            # we have to override __init__ to change super(CompiledObject, self)
-            # to Context, in order to prevent an infinite recursion
-            Context.__init__(self, evaluator, parent_context)
-            self.obj = obj
-            self.tree_node = faked_class
-
-        def _cls(self):
-            if self.obj.__class__ == IntrospectionModule:
-                return self
-            else:
-                return super()._cls(self)
-
-        @property
-        def py__call__(self):
-            def actual(params):
-                # Parse the docstring to find the return type:
-                ret_type = ''
-                if '->' in self.obj.__doc__:
-                    ret_type = self.obj.__doc__.split('->')[1].strip()
-                    ret_type = ret_type.replace(' or None', '')
-                if ret_type.startswith('iter:'):
-                    ret_type = ret_type[len('iter:'):]  # we don't care if it's an iterator
-
-                if hasattr(__builtins__, ret_type):
-                    # The function we're inspecting returns a builtin python type, that's easy
-                    # (see test/test_evaluate/test_compiled.py in the jedi source code for usage)
-                    builtins = get_special_object(self.evaluator, 'BUILTINS')
-                    builtin_obj = builtins.py__getattribute__(ret_type)
-                    obj = _create_from_name(self.evaluator, builtins, builtin_obj, "")
-                    return self.evaluator.execute(obj, params)
-                else:
-                    # The function we're inspecting returns a GObject type
-                    parent = self.parent_context.obj.__name__
-                    if parent.startswith('gi.repository'):
-                        parent = parent[len('gi.repository.'):]
-                    else:
-                        # a module with overrides, such as Gtk, behaves differently
-                        parent_module = self.parent_context.obj.__module__
-                        if parent_module.startswith('gi.overrides'):
-                            parent_module = parent_module[len('gi.overrides.'):]
-                            parent = '%s.%s' % (parent_module, parent)
-
-                    if ret_type.startswith(parent):
-                        # A pygobject type in the same module
-                        ret_type = ret_type[len(parent):]
-                    else:
-                        # A pygobject type in a different module
-                        return_type_parent = ret_type.split('.', 1)[0]
-                        ret_type = 'from gi.repository import %s\n%s' % (return_type_parent, ret_type)
-                    result = _evaluate_for_statement_string(self.parent_context, ret_type)
-                    return set(result)
-            if type(self.obj) == FunctionInfo:
-                return actual
-            return super().py__call__
-
-    # we need to override CompiledBoundMethod without changing it much,
-    # just so it'll not get confused due to our overriden CompiledObject
-    class PatchedCompiledBoundMethod(PatchedJediCompiledObject):
-        def __init__(self, func):
-            super().__init__(func.evaluator, func.obj, func.parent_context, func.tree_node)
-
-    class PatchedJediImporter(Importer):
-        "A modified version of Jedi Importer to work with GObject Introspection modules"
-        def follow(self):
-            module_list = super().follow()
-            if not module_list:
-                import_path = '.'.join([str(i) for i in self.import_path])
-                if import_path.startswith('gi.repository'):
-                    try:
-                        module = gi_importer.load_module(import_path)
-                        module_list = [PatchedJediCompiledObject(self._evaluator, module)]
-                    except ImportError:
-                        pass
-            return module_list
-
-    original_jedi_get_module = jedi.evaluate.compiled.fake.get_module
-
-    def patched_jedi_get_module(obj):
-        "Work around a weird bug in jedi"
-        try:
-            return original_jedi_get_module(obj)
-        except ImportError as e:
-            if e.msg == "No module named 'gi._gobject._gobject'":
-                return original_jedi_get_module('gi._gobject')
-
-    jedi.evaluate.compiled.fake.get_module = patched_jedi_get_module
-    jedi.evaluate.compiled.CompiledObject = PatchedJediCompiledObject
-    jedi.evaluate.instance.CompiledBoundMethod = PatchedCompiledBoundMethod
-    jedi.evaluate.imports.Importer = PatchedJediImporter
-    HAS_JEDI = True
 except ImportError:
     print("jedi not found, python auto-completion not possible.")
-    HAS_JEDI = False
-
+    IS_JEDI_PATCHED = False
+else:
+    IS_JEDI_PATCHED = patch_jedi()
 GIR_PATH_LIST = []
 
 def init_gir_path_list():
@@ -348,243 +371,151 @@ def update_doc_db_on_startup():
 
 update_doc_db_on_startup()
 
-class JediCompletionProvider(Ide.Object, GtkSource.CompletionProvider, Ide.CompletionProvider):
+def get_proxy_cb(app, result, task):
+    try:
+        worker = app.get_worker_finish(result)
+        task.return_object(worker)
+    except Exception as ex:
+        return_error(task, ex)
+
+def get_proxy_async(cancellable, callback, data):
+    global _PROXY_TASK
+
+    task = Ide.Task.new(None, None, callback, data)
+    task.set_name('get-jedi-proxy')
+
+    if _PROXY_TASK:
+        _PROXY_TASK.chain(task)
+        return
+
+    task.set_release_on_propagate(False)
+    _PROXY_TASK = task
+
+    app = Gio.Application.get_default()
+    app.get_worker_async('jedi_plugin', None, get_proxy_cb, task)
+
+def get_proxy_finish(result):
+    return result.propagate_object()
+
+def code_complete_cb(proxy, result, task):
+    try:
+        variant = proxy.call_finish(result)
+        task.variant = variant.get_child_value(0)
+        task.return_boolean(True)
+    except Exception as ex:
+        return_error(task, ex)
+
+def code_complete_async(proxy, filename, line, line_offset, text, cancellable, callback, data=None):
+    task = Ide.Task.new(proxy, cancellable, callback, data)
+    task.set_name('jedi-code-complete')
+
+    proxy.call('CodeComplete',
+               GLib.Variant('(siis)', (filename, line, line_offset, text)),
+               0, 10000, cancellable, code_complete_cb, task)
+
+def code_complete_finish(proxy, task):
+    task.propagate_boolean()
+    return task.variant
+
+class JediCompletionProvider(Ide.Object, Ide.CompletionProvider):
     context = None
     current_word = None
     results = None
     thread = None
-    line_str = None
     line = -1
     line_offset = -1
     loading_proxy = False
 
     proxy = None
 
-    def do_get_name(self):
-        return 'Jedi Provider'
+    def do_get_title(self):
+        return 'Jedi'
 
     def do_get_icon(self):
         return None
 
-    def invalidates(self, line_str):
-        if not line_str.startswith(self.line_str):
-            return True
-        suffix = line_str[len(self.line_str):]
-        for ch in suffix:
-            if ch in (')', '.', ']'):
-                return True
-        return False
-
-    def do_populate(self, context):
-        self.current_word = Ide.CompletionProvider.context_current_word(context)
-        self.current_word_lower = self.current_word.lower()
-
-        _, iter = context.get_iter()
-
-        begin = iter.copy()
-        begin.set_line_offset(0)
-        line_str = begin.get_slice(iter)
-
-        # If we have no results yet, but a thread is active and mostly matches
-        # our line prefix, then we should just let that one continue but tell
-        # it to deliver to our new context.
-        if self.context is not None:
-            if not line_str.startswith(self.line_str):
-                self.cancellable.cancel()
-        self.context = context
-
-        if iter.get_line() == self.line and not self.invalidates(line_str):
-            if self.results and self.results.replay(self.current_word):
-                self.results.present(self, context)
-                return
-
-        self.line_str = line_str
-
-        buffer = iter.get_buffer()
-
-        begin, end = buffer.get_bounds()
-        filename = (iter.get_buffer()
-                        .get_file()
-                        .get_file()
-                        .get_path())
-
-        text = buffer.get_text(begin, end, True)
-        line = iter.get_line() + 1
-        column = iter.get_line_offset()
-
-        self.line = iter.get_line()
-        self.line_offset = iter.get_line_offset()
-
-        results = Ide.CompletionResults(query=self.current_word)
-
-        self.cancellable = cancellable = Gio.Cancellable()
-        context.connect('cancelled', lambda *_: cancellable.cancel())
-
-        def async_handler(proxy, result, user_data):
-            (self, results, context) = user_data
-
-            try:
-                variant = proxy.call_finish(result)
-                # unwrap outer tuple
-                variant = variant.get_child_value(0)
-                for i in range(variant.n_children()):
-                    proposal = JediCompletionProposal(self, context, variant, i)
-                    results.take_proposal(proposal)
-                self.complete(context, results)
-            except Exception as ex:
-                if isinstance(ex, GLib.Error) and \
-                   ex.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
-                    return
-                print(repr(ex))
-                context.add_proposals(self, [], True)
-
-        self.proxy.call('CodeComplete',
-                        GLib.Variant('(siis)', (filename, self.line, self.line_offset, text)),
-                        0, 10000, cancellable, async_handler, (self, results, context))
-
-    def do_match(self, context):
-        if not HAS_JEDI:
-            return False
-
-        if not self.proxy and not self.loading_proxy:
-            def get_worker_cb(app, result):
-                self.loading_proxy = False
-                self.proxy = app.get_worker_finish(result)
-            self.loading_proxy = True
-            app = Gio.Application.get_default()
-            app.get_worker_async('jedi_plugin', None, get_worker_cb)
-
-        if not self.proxy:
-            return False
-
-        if context.get_activation() == GtkSource.CompletionActivation.INTERACTIVE:
-            _, iter = context.get_iter()
-            iter.backward_char()
-            ch = iter.get_char()
-            if not (ch in ('_', '.') or ch.isalnum()):
-                return False
-            buffer = iter.get_buffer()
-            if Ide.CompletionProvider.context_in_comment_or_string(context):
-                return False
-
-        return True
-
-    def do_get_start_iter(self, context, proposal):
-        _, iter = context.get_iter()
-        if self.line != -1 and self.line_offset != -1:
-            iter.set_line(self.line)
-            iter.set_line_offset(0)
-            line_offset = self.line_offset
-            while not iter.ends_line() and line_offset > 0:
-                if not iter.forward_char():
-                    break
-                line_offset -= 1
-        return True, iter
-
-    def do_activate_proposal(self, proposal, iter):
-        # We may have generated completions a few characters before
-        # our current insertion mark. So let's delete any of that
-        # transient text.
-        if iter.get_line() == self.line:
-            begin = iter.copy()
-            begin.set_line_offset(0)
-            line_offset = self.line_offset
-            while not begin.ends_line() and line_offset > 0:
-                if not begin.forward_char():
-                    break
-                line_offset -= 1
-            buffer = iter.get_buffer()
-            buffer.begin_user_action()
-            buffer.delete(begin, iter)
-            buffer.end_user_action()
-
-        snippet = JediSnippet(proposal)
-        proposal.context.props.completion.props.view.push_snippet(snippet, None)
-
-        self.results = None
-        self.line = -1
-        self.line_offset = -1
-
-        return True, None
-
-    def do_get_interactive_delay(self):
-        return -1
-
-    def do_get_priority(self):
+    def do_get_priority(self, context):
         return 200
 
-    def complete(self, context, results):
-        # If context and self.context are not the same, that means
-        # we stole the results of this task for a later completion.
-        self.results = results
-        self.results.present(self, self.context)
-        self.context = None
+    def do_load(self, context):
+        pass
 
+    def do_get_comment(self, proposal):
+        return proposal.get_comment()
 
-class JediCompletionProposal(Ide.CompletionItem, GtkSource.CompletionProposal):
-    def __init__(self, provider, context, variant, index, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.provider = provider
-        self.context = context
-        self._variant = variant
-        self._index = index
+    def do_activate_proposal(self, context, proposal, key):
+        buffer = context.get_buffer()
+        view = context.get_view()
 
-    @property
-    def variant(self):
-        return self._variant.get_child_value(self._index)
+        _, begin, end = context.get_bounds()
 
-    @property
-    def completion_type(self):
-        return self.variant.get_child_value(0).get_int32()
+        snippet = proposal.get_snippet()
 
-    @property
-    def completion_label(self):
-        return self.variant.get_child_value(1).get_string()
+        buffer.begin_user_action()
+        buffer.delete(begin, end)
+        view.push_snippet(snippet, begin)
+        buffer.end_user_action()
 
-    @property
-    def completion_text(self):
-        return self.variant.get_child_value(2).get_string()
+    def do_display_proposal(self, row, context, typed_text, proposal):
+        casefold = typed_text.lower()
 
-    @property
-    def completion_params(self):
-        return self.variant.get_child_value(3).unpack()
+        row.set_icon_name(proposal.get_icon_name())
+        row.set_left(None)
+        row.set_center_markup(proposal.get_markup(casefold))
+        row.set_right(None)
 
-    @property
-    def completion_doc(self):
-        return self.variant.get_child_value(4).get_string()
+    def do_is_trigger(self, iter, ch):
+        if ch == '.':
+            buffer = iter.get_buffer()
+            if buffer.iter_has_context_class(iter, 'string') or \
+               buffer.iter_has_context_class(iter, 'comment'):
+                return False
+            return True
+        return False
 
-    def do_get_label(self):
-        return self.completion_label
+    def do_populate_async(self, context, cancellable, callback, data):
+        task = Ide.Task.new(self, None, callback)
+        task.set_name('jedi-completion')
 
-    def do_match(self, query, casefold):
-        label = self.completion_label
-        ret, priority = Ide.CompletionItem.fuzzy_match(label, self.provider.current_word_lower)
-        # Penalize words that start with __ like __eq__.
-        if label.startswith('__'):
-            priority += 1000
-        self.set_priority(priority)
-        return ret
+        self.current_word = context.get_word()
+        self.current_word_lower = self.current_word.lower()
 
-    def do_get_markup(self):
-        label = self.completion_label
-        name = Ide.CompletionItem.fuzzy_highlight(label, self.provider.current_word_lower)
-        if self.completion_type == _TYPE_FUNCTION:
-            params = self.completion_params
-            if params is not None:
-                return ''.join([name, '(', ', '.join(self.completion_params), ')'])
-            else:
-                return name + '()'
-        return name
+        _, iter, _ = context.get_bounds()
 
-    def do_get_text(self):
-        return self.completion_text
+        buffer = context.get_buffer()
 
-    def do_get_icon_name(self):
-        return _ICONS.get(self.completion_type, None)
+        begin, end = buffer.get_bounds()
 
-    def do_get_info(self):
-        return self.completion_doc
+        task.filename = buffer.get_file().get_path()
+        task.line = iter.get_line()
+        task.line_offset = iter.get_line_offset()
+        #if task.line_offset > 0:
+        #    task.line_offset -= 1
+        task.text = buffer.get_text(begin, end, True)
 
+        def code_complete_cb(obj, result, task):
+            try:
+                variant = code_complete_finish(obj, result)
+                task.return_object(JediResults(variant))
+            except Exception as ex:
+                return_error(task, ex)
+
+        def get_proxy_cb(obj, result, task):
+            try:
+                proxy = get_proxy_finish(result)
+                code_complete_async(proxy, task.filename, task.line, task.line_offset, task.text, task.get_cancellable(), code_complete_cb, task)
+            except Exception as ex:
+                return_error(task, ex)
+
+        get_proxy_async(None, get_proxy_cb, task)
+
+    def do_populate_finish(self, result):
+        return result.propagate_object()
+
+    def do_refilter(self, context, model):
+        word = context.get_word().lower()
+        model.refilter(word)
+        return True
 
 class JediCompletionRequest:
     did_run = False
@@ -619,6 +550,8 @@ class JediCompletionRequest:
 
         def get_gi_obj(info):
             """ Get a GObject Introspection object from a jedi Completion, or None if the completion is not GObject Introspection related """
+            if not IS_JEDI_PATCHED:
+                return None
             if (type(info._module) == PatchedJediCompiledObject and
                info._module.obj.__class__ == IntrospectionModule):
                 return next(info._name.infer()).obj
@@ -688,7 +621,7 @@ class JediService(Ide.DBusService):
         self.queue = {}
         self.handler_id = 0
 
-    @Ide.DBusMethod('org.gnome.builder.plugins.jedi', in_signature='siis', out_signature='a(issass)', async=True)
+    @Ide.DBusMethod('org.gnome.builder.plugins.jedi', in_signature='siis', out_signature='a(issass)', is_async=True)
     def CodeComplete(self, invocation, filename, line, column, content):
         if filename in self.queue:
             request = self.queue.pop(filename)
@@ -722,36 +655,115 @@ class JediWorker(GObject.Object, Ide.Worker):
                                       'org.gnome.builder.plugins.jedi',
                                       None)
 
-def JediSnippet(proposal):
-    snippet = Ide.SourceSnippet()
-    snippet.add_chunk(Ide.SourceSnippetChunk(text=proposal.completion_text, text_set=True))
-
-    # Add parameter completion for functions.
-    if proposal.completion_type == _TYPE_FUNCTION:
-        snippet.add_chunk(Ide.SourceSnippetChunk(text='(', text_set=True))
-        params = proposal.completion_params
-        if params:
-            tab_stop = 0
-            for param in params[:-1]:
-                tab_stop += 1
-                snippet.add_chunk(Ide.SourceSnippetChunk(text=param, text_set=True, tab_stop=tab_stop))
-                snippet.add_chunk(Ide.SourceSnippetChunk(text=', ', text_set=True))
-            tab_stop += 1
-            snippet.add_chunk(Ide.SourceSnippetChunk(text=params[-1], text_set=True, tab_stop=tab_stop))
-        snippet.add_chunk(Ide.SourceSnippetChunk(text=')', text_set=True))
-
-    return snippet
-
 
 class JediPreferences(GObject.Object, Ide.PreferencesAddin):
     def do_load(self, prefs):
         self.completion_id = prefs.add_switch(
-                'code-insight', 'completion',
-                'org.gnome.builder.extension-type', 'enabled', '/',
+                'completion', 'providers',
+                'org.gnome.builder.extension-type', 'enabled',
+                '/org/gnome/builder/extension-types/jedi_plugin/IdeCompletionProvider/',
                 None,
-                _("Suggest Python completions"),
+                _("Suggest completions from Python"),
                 _("Use Jedi to provide completions for the Python language"),
                 None, 30)
 
     def do_unload(self, prefs):
         prefs.remove_id(self.completion_id)
+
+class JediResults(GObject.Object, Gio.ListModel):
+    variant = None
+    items = None
+
+    def __init__(self, variant, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.variant = variant
+        self.items = []
+        for i in range(variant.n_children()):
+            self.items.append((i,0))
+
+    def do_get_item_type(self):
+        return type(Ide.CompletionProposal)
+
+    def do_get_n_items(self):
+        return len(self.items)
+
+    def do_get_item(self, position):
+        idx,_ = self.items[position]
+        return JediResult(self.variant.get_child_value(idx))
+
+    def refilter(self, casefold):
+        old_len = len(self.items)
+        self.items = []
+        for i in range(self.variant.n_children()):
+            child = self.variant.get_child_value(i)
+            label = child.get_child_value(1).get_string()
+            match, priority = Ide.Completion.fuzzy_match(label, casefold)
+            if match:
+                self.items.append((i, priority))
+        self.items.sort(key=lambda x: x[1])
+        self.items_changed(0, old_len, len(self.items))
+
+class JediResult(GObject.Object, Ide.CompletionProposal):
+    def __init__(self, variant):
+        super().__init__()
+        self.variant = variant
+
+    def get_kind(self):
+        return self.variant.get_child_value(0).get_int32()
+
+    def get_icon_name(self):
+        kind = self.get_kind()
+        return _ICONS.get(kind, None)
+
+    def get_label(self):
+        return self.variant.get_child_value(1).get_string()
+
+    def get_markup(self, casefold):
+        markup = Ide.Completion.fuzzy_highlight(self.get_label(), casefold)
+
+        kind = self.get_kind()
+        if kind == _TYPE_FUNCTION:
+            parts = []
+            params = self.get_params()
+            for p in params:
+                if p.startswith('param '):
+                    parts.append(p[6:])
+            markup += ''.join(['<span fgalpha="32762">(', ', '.join(parts), ')</span>'])
+
+        return markup
+
+    def get_text(self):
+        return self.variant.get_child_value(2).get_string()
+
+    def get_comment(self):
+        comment = self.variant.get_child_value(4).get_string()
+        if comment and '\n' in comment:
+            return comment[:comment.index('\n')]
+        return comment
+
+    def get_params(self):
+        return self.variant.get_child_value(3).unpack()
+
+    def get_snippet(self):
+        snippet = Ide.Snippet.new(None, None)
+        snippet.add_chunk(Ide.SnippetChunk(spec=self.get_text()))
+
+        # Add parameter completion for functions.
+        kind = self.get_kind()
+        if kind == _TYPE_FUNCTION:
+            snippet.add_chunk(Ide.SnippetChunk(text='(', text_set=True))
+            params = self.get_params()
+            if params:
+                tab_stop = 0
+                for param in params[:-1]:
+                    tab_stop += 1
+                    if param.startswith('param '):
+                        param = param[6:]
+                    snippet.add_chunk(Ide.SnippetChunk(text=param, text_set=True, tab_stop=tab_stop))
+                    snippet.add_chunk(Ide.SnippetChunk(text=', ', text_set=True))
+                tab_stop += 1
+                snippet.add_chunk(Ide.SnippetChunk(text=params[-1], text_set=True, tab_stop=tab_stop))
+            snippet.add_chunk(Ide.SnippetChunk(text=')', text_set=True))
+
+        return snippet
+

@@ -1,6 +1,6 @@
 /* gstyle-color-scale.c
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "gstyle-color-scale"
@@ -265,7 +267,7 @@ gstyle_color_scale_add_rgba_color_stop (GstyleColorScale *self,
                                 self);
       id_count += 1;
 
-      g_clear_pointer (&self->pattern, cairo_pattern_destroy);
+      gstyle_clear_pointer (&self->pattern, cairo_pattern_destroy);
 
       if (gtk_widget_get_realized (GTK_WIDGET (self)))
         gtk_widget_queue_draw (GTK_WIDGET (self));
@@ -400,7 +402,7 @@ gstyle_color_scale_set_kind (GstyleColorScale     *self,
                                                                     self->data_stride);
         }
 
-      g_clear_pointer (&self->pattern, cairo_pattern_destroy);
+      gstyle_clear_pointer (&self->pattern, cairo_pattern_destroy);
       g_object_notify_by_pspec (G_OBJECT (self), properties [PROP_KIND]);
 
       if (gtk_widget_get_realized (GTK_WIDGET (self)))
@@ -507,7 +509,7 @@ update_pattern (GstyleColorScale *self)
         }
     }
 
-  g_clear_pointer (&self->pattern, cairo_pattern_destroy);
+  gstyle_clear_pointer (&self->pattern, cairo_pattern_destroy);
   self->pattern = pattern;
 }
 
@@ -598,13 +600,13 @@ gstyle_color_scale_finalize (GObject *object)
   g_clear_object (&self->long_press_gesture);
   g_clear_object (&self->default_provider);
 
-  g_clear_pointer (&self->custom_color_stops, g_sequence_free);
-  g_clear_pointer (&self->checkered_pattern, cairo_pattern_destroy);
-  g_clear_pointer (&self->pattern, cairo_pattern_destroy);
-  g_clear_pointer (&self->data_surface, cairo_pattern_destroy);
+  gstyle_clear_pointer (&self->custom_color_stops, g_sequence_free);
+  gstyle_clear_pointer (&self->checkered_pattern, cairo_pattern_destroy);
+  gstyle_clear_pointer (&self->pattern, cairo_pattern_destroy);
+  gstyle_clear_pointer (&self->data_surface, cairo_surface_destroy);
 
-  g_clear_pointer (&self->data_raw, g_free);
-  g_clear_pointer (&self->data_raw_filtered, g_free);
+  gstyle_clear_pointer (&self->data_raw, g_free);
+  gstyle_clear_pointer (&self->data_raw_filtered, g_free);
 
   G_OBJECT_CLASS (gstyle_color_scale_parent_class)->finalize (object);
 }

@@ -1,6 +1,6 @@
 /* ide-terminal.c
  *
- * Copyright © 2016-2017 Christian Hergert <christian@hergert.me>
+ * Copyright 2016-2019 Christian Hergert <christian@hergert.me>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,13 +14,19 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
+
+#define G_LOG_DOMAIN "ide-terminal"
+
+#include "config.h"
 
 #include <dazzle.h>
 #include <glib/gi18n.h>
-#include <ide.h>
+#include <libide-gui.h>
 
-#include "terminal/ide-terminal.h"
+#include "ide-terminal.h"
 
 #define BUILDER_PCRE2_MULTILINE 0x00000400u
 
@@ -37,6 +43,12 @@ typedef struct
   GdkEvent   *event;
 } PopupInfo;
 
+typedef struct
+{
+  gint line;
+  gint column;
+} Position;
+
 G_DEFINE_TYPE_WITH_PRIVATE (IdeTerminal, ide_terminal, VTE_TYPE_TERMINAL)
 
 enum {
@@ -51,9 +63,11 @@ enum {
 /* From vteapp.c */
 #define DINGUS1 "(((gopher|news|telnet|nntp|file|http|ftp|https)://)|(www|ftp)[-A-Za-z0-9]*\\.)[-A-Za-z0-9\\.]+(:[0-9]*)?"
 #define DINGUS2 DINGUS1 "/[-A-Za-z0-9_\\$\\.\\+\\!\\*\\(\\),;:@&=\\?/~\\#\\%]*[^]'\\.}>\\) ,\\\"]"
+#define FILENAME_PLUS_LOCATION "(?<filename>[a-zA-Z0-9\\+\\-\\.\\/_]+):(?<line>\\d+):(?<column>\\d+)"
 
 static guint signals[N_SIGNALS];
-static const gchar *url_regexes[] = { DINGUS1, DINGUS2 };
+static const gchar *url_regexes[] = { DINGUS1, DINGUS2, FILENAME_PLUS_LOCATION };
+static GRegex *filename_regex;
 static const GdkRGBA solarized_palette[] = {
   /*
    * Solarized palette (1.0.0beta2):
@@ -150,7 +164,7 @@ popup_targets_received (GtkClipboard     *clipboard,
 
       priv->url = vte_terminal_match_check_event (VTE_TERMINAL (self), event, NULL);
 
-      menu = dzl_application_get_menu_by_id (DZL_APPLICATION_DEFAULT, "ide-terminal-view-popup-menu");
+      menu = dzl_application_get_menu_by_id (DZL_APPLICATION_DEFAULT, "ide-terminal-page-popup-menu");
       priv->popup_menu = gtk_menu_new_from_model (G_MENU_MODEL (menu));
 
       group = DZL_WIDGET_ACTION_GROUP (gtk_widget_get_action_group (GTK_WIDGET (self), "terminal"));
@@ -209,37 +223,37 @@ ide_terminal_button_press_event (GtkWidget      *widget,
                                  GdkEventButton *button)
 {
   IdeTerminal *self = (IdeTerminal *)widget;
+  IdeTerminalPrivate *priv = ide_terminal_get_instance_private (self);
 
   g_assert (IDE_IS_TERMINAL (self));
   g_assert (button != NULL);
 
-  if ((button->type == GDK_BUTTON_PRESS) && (button->button == GDK_BUTTON_SECONDARY))
+  if (button->type == GDK_BUTTON_PRESS)
     {
-      if (!gtk_widget_has_focus (GTK_WIDGET (self)))
-        gtk_widget_grab_focus (GTK_WIDGET (self));
-
-      ide_terminal_do_popup (self, (GdkEvent *)button);
-
-      return GDK_EVENT_STOP;
-    }
-  else if ((button->type == GDK_BUTTON_PRESS) && (button->button == GDK_BUTTON_PRIMARY)
-            && ((button->state & GDK_CONTROL_MASK) == GDK_CONTROL_MASK))
-    {
-      g_autofree gchar *pattern = NULL;
-
-      pattern = vte_terminal_match_check_event (VTE_TERMINAL (self), (GdkEvent *)button, NULL);
-
-      if (pattern != NULL)
+      if (button->button == GDK_BUTTON_PRIMARY)
         {
-          GtkApplication *app;
-          GtkWindow *focused_window;
+          g_autofree gchar *pattern = NULL;
 
-          if (NULL != (app = GTK_APPLICATION (g_application_get_default ())) &&
-              NULL != (focused_window = gtk_application_get_active_window (app)))
-            gtk_show_uri_on_window (focused_window,
-                                    pattern,
-                                    gtk_get_current_event_time (),
-                                    NULL);
+          pattern = vte_terminal_match_check_event (VTE_TERMINAL (self), (GdkEvent *)button, NULL);
+
+          if (pattern != NULL)
+            {
+              gboolean ret = GDK_EVENT_PROPAGATE;
+
+              g_free (priv->url);
+              priv->url = g_steal_pointer (&pattern);
+
+              g_signal_emit (self, signals [OPEN_LINK], 0, &ret);
+
+              return ret;
+            }
+        }
+      else if (button->button == GDK_BUTTON_SECONDARY)
+        {
+          if (!gtk_widget_has_focus (GTK_WIDGET (self)))
+            gtk_widget_grab_focus (GTK_WIDGET (self));
+
+          ide_terminal_do_popup (self, (GdkEvent *)button);
 
           return GDK_EVENT_STOP;
         }
@@ -268,7 +282,7 @@ ide_terminal_copy_link_address (IdeTerminal *self)
   g_assert (IDE_IS_TERMINAL (self));
   g_assert (priv->url != NULL);
 
-  if (dzl_str_empty0 (priv->url))
+  if (ide_str_empty0 (priv->url))
     return FALSE;
 
   gtk_clipboard_set_text (gtk_widget_get_clipboard (GTK_WIDGET (self), GDK_SELECTION_CLIPBOARD),
@@ -277,25 +291,76 @@ ide_terminal_copy_link_address (IdeTerminal *self)
   return TRUE;
 }
 
+static void
+ide_terminal_open_link_resolve_cb (GObject      *object,
+                                   GAsyncResult *result,
+                                   gpointer      user_data)
+{
+  IdeWorkbench *workbench = (IdeWorkbench *)object;
+  g_autoptr(GFile) file = NULL;
+  Position *pos = user_data;
+
+  g_assert (IDE_IS_MAIN_THREAD ());
+  g_assert (IDE_IS_WORKBENCH (workbench));
+  g_assert (G_IS_ASYNC_RESULT (result));
+
+  if ((file = ide_workbench_resolve_file_finish (workbench, result, NULL)))
+    ide_workbench_open_at_async (workbench,
+                                 file,
+                                 "editor",
+                                 pos->line,
+                                 pos->column,
+                                 IDE_BUFFER_OPEN_FLAGS_NONE,
+                                 NULL, NULL, NULL);
+
+  g_slice_free (Position, pos);
+}
+
 static gboolean
 ide_terminal_open_link (IdeTerminal *self)
 {
   IdeTerminalPrivate *priv = ide_terminal_get_instance_private (self);
+  g_autoptr(GMatchInfo) match = NULL;
+  g_autofree gchar *filename = NULL;
+  g_autofree gchar *line = NULL;
+  g_autofree gchar *column = NULL;
   GtkApplication *app;
   GtkWindow *focused_window;
 
   g_assert (IDE_IS_TERMINAL (self));
   g_assert (priv->url != NULL);
 
-  if (dzl_str_empty0 (priv->url))
+  if (ide_str_empty0 (priv->url))
     return FALSE;
 
-  if (NULL != (app = GTK_APPLICATION (g_application_get_default ())) &&
-      NULL != (focused_window = gtk_application_get_active_window (app)))
-    return gtk_show_uri_on_window (focused_window,
-                                   priv->url,
-                                   gtk_get_current_event_time (),
-                                   NULL);
+  if (g_regex_match (filename_regex, priv->url, 0, &match) &&
+      (filename = g_match_info_fetch (match, 1)) &&
+      (line = g_match_info_fetch (match, 2)) &&
+      (column = g_match_info_fetch (match, 3)))
+    {
+      IdeWorkbench *workbench = ide_widget_get_workbench (GTK_WIDGET (self));
+      gint64 lineno = g_ascii_strtoull (line, NULL, 10);
+      gint64 columnno = g_ascii_strtoull (column, NULL, 10);
+      Position pos = {
+        MAX (lineno, 1) - 1,
+        MAX (columnno, 1) - 1,
+      };
+
+      ide_workbench_resolve_file_async (workbench,
+                                        filename,
+                                        NULL,
+                                        ide_terminal_open_link_resolve_cb,
+                                        g_slice_dup (Position, &pos));
+
+      return TRUE;
+    }
+
+  if ((app = GTK_APPLICATION (g_application_get_default ())) &&
+      (focused_window = gtk_application_get_active_window (app)))
+    return ide_gtk_show_uri_on_window (focused_window,
+                                       priv->url,
+                                       g_get_monotonic_time (),
+                                       NULL);
 
   return FALSE;
 }
@@ -398,6 +463,9 @@ ide_terminal_class_init (IdeTerminalClass *klass)
   klass->select_all = ide_terminal_real_select_all;
   klass->search_reveal = ide_terminal_real_search_reveal;
 
+  filename_regex = g_regex_new (FILENAME_PLUS_LOCATION, 0, 0, NULL);
+  g_assert (filename_regex != NULL);
+
   signals [COPY_LINK_ADDRESS] =
     g_signal_new ("copy-link-address",
                   G_TYPE_FROM_CLASS (klass),
@@ -474,6 +542,8 @@ ide_terminal_init (IdeTerminal *self)
 
   dzl_widget_action_group_attach (self, "terminal");
 
+  vte_terminal_set_allow_hyperlink (VTE_TERMINAL (self), TRUE);
+
   for (guint i = 0; i < G_N_ELEMENTS (url_regexes); i++)
     {
       g_autoptr(VteRegex) regex = NULL;
@@ -484,10 +554,11 @@ ide_terminal_init (IdeTerminal *self)
                                        VTE_REGEX_FLAGS_DEFAULT | BUILDER_PCRE2_MULTILINE,
                                        NULL);
       tag = vte_terminal_match_add_regex (VTE_TERMINAL (self), regex, 0);
-      vte_terminal_match_set_cursor_type (VTE_TERMINAL (self), tag, GDK_HAND2);
+      vte_terminal_match_set_cursor_name (VTE_TERMINAL (self), tag, "hand2");
     }
 
   priv->settings = g_settings_new ("org.gnome.builder.terminal");
+  g_settings_bind (priv->settings, "allow-bold", self, "allow-bold", G_SETTINGS_BIND_GET);
   g_signal_connect_object (priv->settings,
                            "changed::font-name",
                            G_CALLBACK (ide_terminal_font_changed),

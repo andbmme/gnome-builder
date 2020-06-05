@@ -1,6 +1,6 @@
 /* ide-cursor.h
  *
- * Copyright © 2017 Anoop Chandu <anoopchandu96@gmail.com>
+ * Copyright 2017 Anoop Chandu <anoopchandu96@gmail.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,24 +14,19 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #pragma once
 
-#include <glib-object.h>
+#include "ide-source-view.h"
 
 G_BEGIN_DECLS
 
 #define IDE_TYPE_CURSOR (ide_cursor_get_type())
 
 G_DECLARE_FINAL_TYPE (IdeCursor, ide_cursor, IDE, CURSOR, GObject)
-
-typedef enum
-{
-  IDE_CURSOR_COLUMN,
-  IDE_CURSOR_SELECT,
-  IDE_CURSOR_MATCH
-} IdeCursorType;
 
 void         ide_cursor_add_cursor            (IdeCursor *self,
                                                guint      type);

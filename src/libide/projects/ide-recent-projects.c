@@ -1,6 +1,6 @@
 /* ide-recent-projects.c
  *
- * Copyright © 2015 Christian Hergert <christian@hergert.me>
+ * Copyright 2015-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,14 +14,21 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
+
+#define G_LOG_DOMAIN "ide-recent-projects"
+
+#include "config.h"
 
 #include <glib/gi18n.h>
 #include <gtk/gtk.h>
+#include <libide-core.h>
 
-#include "ide-global.h"
-
-#include "projects/ide-recent-projects.h"
+#include "ide-project-info.h"
+#include "ide-project-info-private.h"
+#include "ide-recent-projects.h"
 
 struct _IdeRecentProjects
 {
@@ -47,6 +54,29 @@ ide_recent_projects_new (void)
   return g_object_new (IDE_TYPE_RECENT_PROJECTS, NULL);
 }
 
+/**
+ * ide_recent_projects_get_default:
+ *
+ * Gets a shared #IdeRecentProjects instance.
+ *
+ * If this instance is unref'd, a new instance will be created on the next
+ * request to get the default #IdeRecentProjects instance.
+ *
+ * Returns: (transfer none): an #IdeRecentProjects
+ *
+ * Since: 3.32
+ */
+IdeRecentProjects *
+ide_recent_projects_get_default (void)
+{
+  static IdeRecentProjects *instance;
+
+  if (instance == NULL)
+    g_set_weak_pointer (&instance, ide_recent_projects_new ());
+
+  return instance;
+}
+
 static void
 ide_recent_projects_added (IdeRecentProjects *self,
                            IdeProjectInfo    *project_info)
@@ -57,7 +87,7 @@ ide_recent_projects_added (IdeRecentProjects *self,
   g_assert (IDE_IS_RECENT_PROJECTS (self));
   g_assert (IDE_IS_PROJECT_INFO (project_info));
 
-  file = ide_project_info_get_file (project_info);
+  file = _ide_project_info_get_real_file (project_info);
   uri = g_file_get_uri (file);
 
   if (!g_hash_table_contains (self->recent_uris, uri))
@@ -81,22 +111,23 @@ static GBookmarkFile *
 ide_recent_projects_get_bookmarks (IdeRecentProjects  *self,
                                    GError            **error)
 {
-  GBookmarkFile *bookmarks;
+  g_autoptr(GBookmarkFile) bookmarks = NULL;
+  g_autoptr(GError) local_error = NULL;
 
   g_assert (IDE_IS_RECENT_PROJECTS (self));
 
   bookmarks = g_bookmark_file_new ();
 
-  if (!g_bookmark_file_load_from_file (bookmarks, self->file_uri, error))
+  if (!g_bookmark_file_load_from_file (bookmarks, self->file_uri, &local_error))
     {
-      if (!g_error_matches (*error, G_FILE_ERROR, G_FILE_ERROR_NOENT))
+      if (!g_error_matches (local_error, G_FILE_ERROR, G_FILE_ERROR_NOENT))
         {
-          g_object_unref (bookmarks);
+          g_propagate_error (error, g_steal_pointer (&local_error));
           return NULL;
         }
     }
 
-  return bookmarks;
+  return g_steal_pointer (&bookmarks);
 }
 
 static void
@@ -106,13 +137,10 @@ ide_recent_projects_load_recent (IdeRecentProjects *self)
   g_autoptr(GError) error = NULL;
   gboolean needs_sync = FALSE;
   gchar **uris;
-  gssize z;
 
   g_assert (IDE_IS_RECENT_PROJECTS (self));
 
-  projects_file = ide_recent_projects_get_bookmarks (self, &error);
-
-  if (projects_file == NULL)
+  if (!(projects_file = ide_recent_projects_get_bookmarks (self, &error)))
     {
       g_warning ("Unable to open recent projects file: %s", error->message);
       return;
@@ -120,7 +148,7 @@ ide_recent_projects_load_recent (IdeRecentProjects *self)
 
   uris = g_bookmark_file_get_uris (projects_file, NULL);
 
-  for (z = 0; uris[z]; z++)
+  for (gsize z = 0; uris[z]; z++)
     {
       g_autoptr(GDateTime) last_modified_at = NULL;
       g_autoptr(GFile) project_file = NULL;
@@ -129,16 +157,17 @@ ide_recent_projects_load_recent (IdeRecentProjects *self)
       g_autoptr(IdeProjectInfo) project_info = NULL;
       g_autofree gchar *name = NULL;
       g_autofree gchar *description = NULL;
+      const gchar *build_system_hint = NULL;
       const gchar *build_system_name = NULL;
       const gchar *uri = uris[z];
+      const gchar *diruri = NULL;
       time_t modified;
       g_auto(GStrv) groups = NULL;
       gsize len;
-      gsize i;
 
       groups = g_bookmark_file_get_groups (projects_file, uri, &len, NULL);
 
-      for (i = 0; i < len; i++)
+      for (gsize i = 0; i < len; i++)
         {
           if (g_str_equal (groups [i], IDE_RECENT_PROJECTS_GROUP))
             goto is_project;
@@ -160,19 +189,45 @@ ide_recent_projects_load_recent (IdeRecentProjects *self)
       description = g_bookmark_file_get_description (projects_file, uri, NULL);
       modified = g_bookmark_file_get_modified  (projects_file, uri, NULL);
       last_modified_at = g_date_time_new_from_unix_local (modified);
-      directory = g_file_get_parent (project_file);
 
-      languages = g_ptr_array_new ();
-      for (i = 0; i < len; i++)
+      for (gsize i = 0; i < len; i++)
+        {
+          if (g_str_has_prefix (groups [i], IDE_RECENT_PROJECTS_DIRECTORY))
+            diruri = groups [i] + strlen (IDE_RECENT_PROJECTS_DIRECTORY);
+        }
+
+      if (diruri == NULL)
+        {
+          /* If the old project was a plain-ol'-directory, then we don't want
+           * it's parent (which might be ~/Projects), instead reuse the project
+           * file as the directory too.
+           */
+          if (g_file_query_file_type (project_file, 0, NULL) == G_FILE_TYPE_DIRECTORY)
+            directory = g_file_dup (project_file);
+          else
+            directory = g_file_get_parent (project_file);
+        }
+      else
+        directory = g_file_new_for_uri (diruri);
+
+      languages = g_ptr_array_new_with_free_func (g_free);
+      for (gsize i = 0; i < len; i++)
         {
           if (g_str_has_prefix (groups [i], IDE_RECENT_PROJECTS_LANGUAGE_GROUP_PREFIX))
-            g_ptr_array_add (languages, groups [i] + strlen (IDE_RECENT_PROJECTS_LANGUAGE_GROUP_PREFIX));
+            g_ptr_array_add (languages, g_strdup (groups [i] + strlen (IDE_RECENT_PROJECTS_LANGUAGE_GROUP_PREFIX)));
           else if (g_str_has_prefix (groups [i], IDE_RECENT_PROJECTS_BUILD_SYSTEM_GROUP_PREFIX))
             build_system_name = groups [i] + strlen (IDE_RECENT_PROJECTS_BUILD_SYSTEM_GROUP_PREFIX);
+          else if (g_str_has_prefix (groups [i], IDE_RECENT_PROJECTS_BUILD_SYSTEM_HINT_GROUP_PREFIX))
+            build_system_hint = groups [i] + strlen (IDE_RECENT_PROJECTS_BUILD_SYSTEM_HINT_GROUP_PREFIX);
         }
+
+      /* Cleanup any extra space */
+      for (guint i = 0; i < languages->len; i++)
+        g_strstrip ((gchar *)g_ptr_array_index (languages, i));
       g_ptr_array_add (languages, NULL);
 
       project_info = g_object_new (IDE_TYPE_PROJECT_INFO,
+                                   "build-system-hint", build_system_hint,
                                    "build-system-name", build_system_name,
                                    "description", description,
                                    "directory", directory,
@@ -276,9 +331,12 @@ ide_recent_projects_init (IdeRecentProjects *self)
 /**
  * ide_recent_projects_remove:
  * @self: An #IdeRecentProjects
- * @project_infos: (transfer none) (element-type Ide.ProjectInfo): a #GList of #IdeProjectInfo.
+ * @project_infos: (transfer none) (element-type IdeProjectInfo): a #GList
+ *   of #IdeProjectInfo.
  *
  * Removes the provided projects from the recent projects file.
+ *
+ * Since: 3.32
  */
 void
 ide_recent_projects_remove (IdeRecentProjects *self,
@@ -290,9 +348,7 @@ ide_recent_projects_remove (IdeRecentProjects *self,
 
   g_return_if_fail (IDE_IS_RECENT_PROJECTS (self));
 
-  projects_file = ide_recent_projects_get_bookmarks (self, &error);
-
-  if (projects_file == NULL)
+  if (!(projects_file = ide_recent_projects_get_bookmarks (self, &error)))
     {
       g_warning ("Failed to load bookmarks file: %s", error->message);
       return;
@@ -320,7 +376,7 @@ ide_recent_projects_remove (IdeRecentProjects *self,
           continue;
         }
 
-      file = ide_project_info_get_file (project_info);
+      file = _ide_project_info_get_real_file (project_info);
       file_uri = g_file_get_uri (file);
 
       if (!g_bookmark_file_remove_item (projects_file, file_uri, &error))
@@ -367,7 +423,7 @@ ide_recent_projects_find_by_directory (IdeRecentProjects *self,
   if (!g_file_test (directory, G_FILE_TEST_IS_DIR))
     return NULL;
 
-  if (NULL == (bookmarks = ide_recent_projects_get_bookmarks (self, NULL)))
+  if (!(bookmarks = ide_recent_projects_get_bookmarks (self, NULL)))
     return NULL;
 
   uris = g_bookmark_file_get_uris (bookmarks, &len);

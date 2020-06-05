@@ -2,9 +2,9 @@
  * gedit-view.c
  * This file is part of gedit
  *
- * Copyright © 1998, 1999 Alex Roberts, Evan Lawrence
- * Copyright © 2000, 2002 Chema Celorio, Paolo Maggi
- * Copyright © 2003-2005 Paolo Maggi
+ * Copyright 1998, 1999 Alex Roberts, Evan Lawrence
+ * Copyright 2000, 2002 Chema Celorio, Paolo Maggi
+ * Copyright 2003-2005 Paolo Maggi
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,9 +18,11 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-#include "sourceview/ide-text-util.h"
+#include "ide-text-util.h"
 
 void
 ide_text_util_delete_line (GtkTextView *text_view,

@@ -65,7 +65,7 @@ libgstyle_sources = [
   'gstyle-slidein.c',
   'gstyle-utils.c',
   'gstyle-xyz.c',
-  libgstyle_resources[0],
+  libgstyle_resources,
 ]
 
 libgstyle_deps = [
@@ -75,23 +75,14 @@ libgstyle_deps = [
   libxml2_dep,
 ]
 
-libgstyle_link_args = []
-if ld_supports_version_script
-libgstyle_link_args += ['-Wl,--version-script=' + join_paths(meson.current_source_dir(), 'gstyle.map')]
-endif
-
-libgstyle = shared_library('gstyle-private', libgstyle_sources,
+libgstyle = static_library('gstyle-private', libgstyle_sources,
   dependencies: libgstyle_deps,
-     link_args: libgstyle_link_args,
-  link_depends: 'gstyle.map',
-       version: '0.0.0',
-       install: true,
-   install_dir: pkglibdir,
+        c_args: hidden_visibility_args + release_args,
 )
 
 libgstyle_dep = declare_dependency(
-  link_with: libgstyle,
-  dependencies: libgstyle_deps,
+           link_whole: libgstyle,
+         dependencies: libgstyle_deps,
   include_directories: include_directories('.'),
 )
 
@@ -129,29 +120,5 @@ libgstyle_introspection_sources = [
   'gstyle-xyz.h',
   'gstyle-xyz.c',
 ]
-
-libgstyle_gir = gnome.generate_gir(libgstyle,
-              sources: libgstyle_introspection_sources,
-            nsversion: '1.0',
-            namespace: 'Gstyle',
-        symbol_prefix: 'gstyle',
-    identifier_prefix: 'Gstyle',
-             includes: ['Gdk-3.0', 'Gio-2.0', 'Gtk-3.0', 'GtkSource-3.0'],
-              install: true,
-      install_dir_gir: pkggirdir,
-  install_dir_typelib: pkgtypelibdir,
-           extra_args: [ '--c-include=gstyle-private.h' ],
-)
-
-if get_option('with_vapi')
-
-  libgstyle_vapi = gnome.generate_vapi('gstyle-private',
-        sources: libgstyle_gir[0],
-       packages: ['gio-2.0', 'gtk+-3.0', 'gtksourceview-3.0'],
-        install: true,
-    install_dir: pkgvapidir,
-  )
-
-endif
 
 subdir('tests')

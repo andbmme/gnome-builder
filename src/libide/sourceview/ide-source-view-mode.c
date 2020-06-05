@@ -1,7 +1,7 @@
 /* ide-source-view-mode.c
  *
- * Copyright © 2015 Alexander Larsson <alexl@redhat.com>
- * Copyright © 2015 Christian Hergert <christian@hergert.me>
+ * Copyright 2015 Alexander Larsson <alexl@redhat.com>
+ * Copyright 2015-2019 Christian Hergert <christian@hergert.me>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -15,17 +15,20 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "ide-source-view-mode"
 
+#include "config.h"
+
 #include <glib/gi18n.h>
+#include <libide-core.h>
 #include <string.h>
 
-#include "ide-debug.h"
-
-#include "sourceview/ide-source-view.h"
-#include "sourceview/ide-source-view-mode.h"
+#include "ide-source-view.h"
+#include "ide-source-view-mode.h"
 
 struct _IdeSourceViewMode
 {
@@ -63,7 +66,7 @@ get_param (IdeSourceViewMode *self,
   gtk_style_context_get_style_property (context, param, value);
 }
 
-gboolean
+static gboolean
 get_boolean_param (IdeSourceViewMode *self,
                    const gchar       *param)
 {
@@ -78,7 +81,7 @@ get_boolean_param (IdeSourceViewMode *self,
   return ret;
 }
 
-gchar *
+static gchar *
 get_string_param (IdeSourceViewMode *self,
                   const gchar       *param)
 {
@@ -594,4 +597,20 @@ ide_source_view_mode_set_has_indenter (IdeSourceViewMode *self,
     gtk_style_context_add_class (style_context, "has-indenter");
   else
     gtk_style_context_remove_class (style_context, "has-indenter");
+}
+
+void
+ide_source_view_mode_set_has_selection (IdeSourceViewMode *self,
+                                        gboolean           has_selection)
+{
+  GtkStyleContext *style_context;
+
+  g_assert (IDE_IS_SOURCE_VIEW_MODE (self));
+
+  style_context = gtk_widget_get_style_context (GTK_WIDGET (self));
+
+  if (has_selection)
+    gtk_style_context_add_class (style_context, "has-selection");
+  else
+    gtk_style_context_remove_class (style_context, "has-selection");
 }

@@ -1,6 +1,6 @@
 /* ide-xml-symbol-node.h
  *
- * Copyright © 2017 Sébastien Lafargue <slafargue@gnome.org>
+ * Copyright 2017 Sébastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #pragma once
@@ -21,7 +23,7 @@
 #include "ide-xml-types.h"
 #include "ide-xml-symbol-resolver.h"
 
-#include <ide.h>
+#include <libide-code.h>
 
 G_BEGIN_DECLS
 

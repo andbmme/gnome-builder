@@ -1,6 +1,6 @@
 /* gb-beautifier-process.c
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,12 +14,14 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #include <glib.h>
 #include <glib/gi18n.h>
 #include <gtksourceview/gtksource.h>
-#include <ide.h>
+#include <libide-editor.h>
 #include <string.h>
 
 #include "gb-beautifier-private.h"
@@ -159,8 +161,6 @@ gb_beautifier_process_create_for_clang_format (GbBeautifierEditorAddin  *self,
   g_autoptr(GSubprocessLauncher) launcher = NULL;
   GSubprocess *subprocess = NULL;
   GPtrArray *args;
-  gchar *config_path;
-  gchar *src_path;
   g_autofree gchar *tmp_workdir = NULL;
   g_autofree gchar *tmp_config_path = NULL;
   g_autofree gchar *tmp_src_path = NULL;
@@ -168,11 +168,6 @@ gb_beautifier_process_create_for_clang_format (GbBeautifierEditorAddin  *self,
   g_assert (GB_IS_BEAUTIFIER_EDITOR_ADDIN (self));
   g_assert (state != NULL);
 
-  config_path = g_file_get_path (state->config_file);
-  src_path = g_file_get_path (state->src_file);
-
-  g_assert (!dzl_str_empty0 (config_path));
-  g_assert (!dzl_str_empty0 (src_path));
   g_assert (!dzl_str_empty0 (state->lang_id));
 
   tmp_workdir = g_build_filename (self->tmp_dir, "clang-XXXXXX.txt", NULL);
@@ -210,9 +205,9 @@ gb_beautifier_process_create_for_clang_format (GbBeautifierEditorAddin  *self,
     return NULL;
 
   args = g_ptr_array_new ();
-  g_ptr_array_add (args, "clang-format");
-  g_ptr_array_add (args, "-style=file");
-  g_ptr_array_add (args, tmp_src_path);
+  g_ptr_array_add (args, (gchar *)"clang-format");
+  g_ptr_array_add (args, (gchar *)"-style=file");
+  g_ptr_array_add (args, (gchar *)tmp_src_path);
   g_ptr_array_add (args, NULL);
 
   launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE);
@@ -231,13 +226,13 @@ process_communicate_utf8_cb (GObject      *object,
                              gpointer      user_data)
 {
   g_autoptr(GSubprocess) process = (GSubprocess *)object;
-  g_autoptr(GTask) task = (GTask *)user_data;
+  g_autoptr(IdeTask) task = (IdeTask *)user_data;
   g_autoptr(GBytes) stdout_gb = NULL;
   g_autoptr(GBytes) stderr_gb = NULL;
   const gchar *stdout_str = NULL;
   const gchar *stderr_str = NULL;
   g_autoptr(GError) error = NULL;
-  GtkSourceCompletion *completion;
+  IdeCompletion *completion;
   GtkTextBuffer *buffer;
   GtkTextIter begin;
   GtkTextIter end;
@@ -245,18 +240,18 @@ process_communicate_utf8_cb (GObject      *object,
 
   g_assert (G_IS_SUBPROCESS (process));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
   if (!g_subprocess_communicate_finish (process, result, &stdout_gb, &stderr_gb, &error))
     {
-      g_task_return_error (task, g_steal_pointer (&error));
+      ide_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
-  if (g_task_return_error_if_cancelled (task))
+  if (ide_task_return_error_if_cancelled (task))
     return;
 
-  state = (ProcessState *)g_task_get_task_data (task);
+  state = (ProcessState *)ide_task_get_task_data (task);
   if (stderr_gb != NULL &&
       NULL != (stderr_str = g_bytes_get_data (stderr_gb, NULL)) &&
       !dzl_str_empty0 (stderr_str) &&
@@ -281,9 +276,9 @@ process_communicate_utf8_cb (GObject      *object,
   else if (g_utf8_validate (stdout_str, -1, NULL))
     {
       buffer = gtk_text_view_get_buffer (GTK_TEXT_VIEW (state->source_view));
-      completion = gtk_source_view_get_completion (GTK_SOURCE_VIEW (state->source_view));
+      completion = ide_source_view_get_completion (IDE_SOURCE_VIEW (state->source_view));
 
-      gtk_source_completion_block_interactive (completion);
+      ide_completion_block_interactive (completion);
       gtk_text_buffer_begin_user_action (buffer);
 
       gtk_text_buffer_get_iter_at_mark (buffer, &begin, state->begin_mark);
@@ -298,9 +293,9 @@ process_communicate_utf8_cb (GObject      *object,
       g_signal_emit_by_name (state->source_view, "selection-theatric", IDE_SOURCE_VIEW_THEATRIC_EXPAND);
 
       gtk_text_buffer_end_user_action (buffer);
-      gtk_source_completion_unblock_interactive (completion);
+      ide_completion_unblock_interactive (completion);
 
-      g_task_return_boolean (task, TRUE);
+      ide_task_return_boolean (task, TRUE);
     }
   else
     ide_object_warning (state->self,_("Beautify plugin: the output is not a valid UTF-8 text"));
@@ -312,7 +307,7 @@ create_text_tmp_file_cb (GObject      *object,
                          gpointer      user_data)
 {
   GbBeautifierEditorAddin  *self = (GbBeautifierEditorAddin  *)object;
-  g_autoptr (GTask) task = (GTask *)user_data;
+  g_autoptr (IdeTask) task = (IdeTask *)user_data;
   g_autoptr(GError) error = NULL;
   ProcessState *state;
   GSubprocess *process;
@@ -320,9 +315,9 @@ create_text_tmp_file_cb (GObject      *object,
 
   g_assert (GB_IS_BEAUTIFIER_EDITOR_ADDIN (self));
   g_assert (G_IS_ASYNC_RESULT (result));
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
 
-  state = (ProcessState *)g_task_get_task_data (task);
+  state = (ProcessState *)ide_task_get_task_data (task);
   if (NULL == (state->src_file = gb_beautifier_helper_create_tmp_file_finish (self, result, &error)))
     goto fail;
 
@@ -333,11 +328,11 @@ create_text_tmp_file_cb (GObject      *object,
 
   if (process != NULL)
     {
-      if (g_task_return_error_if_cancelled (task))
+      if (ide_task_return_error_if_cancelled (task))
         g_object_unref (process);
       else
         {
-          cancellable = g_task_get_cancellable (task);
+          cancellable = ide_task_get_cancellable (task);
           g_subprocess_communicate_async (process,
                                           NULL,
                                           cancellable,
@@ -349,7 +344,7 @@ create_text_tmp_file_cb (GObject      *object,
     }
 
 fail:
-  g_task_return_error (task, g_steal_pointer (&error));
+  ide_task_return_error (task, g_steal_pointer (&error));
   return;
 }
 
@@ -386,7 +381,7 @@ gb_beautifier_process_launch_async (GbBeautifierEditorAddin  *self,
 {
   GtkTextBuffer *buffer;
   ProcessState *state;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
   const gchar *lang_id;
 
   g_assert (GB_IS_BEAUTIFIER_EDITOR_ADDIN (self));
@@ -424,10 +419,10 @@ gb_beautifier_process_launch_async (GbBeautifierEditorAddin  *self,
   if (entry->command_args != NULL)
     state->command_args_strs = command_args_copy (entry->command_args);
 
-  task = g_task_new (self, cancellable, callback, user_data);
-  g_task_set_source_tag (task, gb_beautifier_process_launch_async);
-  g_task_set_priority (task, G_PRIORITY_LOW);
-  g_task_set_task_data (task, state, process_state_free);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_source_tag (task, gb_beautifier_process_launch_async);
+  ide_task_set_priority (task, G_PRIORITY_LOW);
+  ide_task_set_task_data (task, state, process_state_free);
 
   gb_beautifier_helper_create_tmp_file_async (self,
                                               state->text,
@@ -442,7 +437,7 @@ gb_beautifier_process_launch_finish (GbBeautifierEditorAddin  *self,
                                      GError                  **error)
 {
   g_assert (GB_IS_BEAUTIFIER_EDITOR_ADDIN (self));
-  g_assert (g_task_is_valid (result, self));
+  g_assert (ide_task_is_valid (result, self));
 
-  return g_task_propagate_boolean (G_TASK (result), error);
+  return ide_task_propagate_boolean (IDE_TASK (result), error);
 }

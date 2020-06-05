@@ -1,6 +1,6 @@
 /* test-gstyle-palette.c
  *
- * Copyright © 2016 sebastien lafargue <slafargue@gnome.org>
+ * Copyright 2016 sebastien lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #include <glib.h>
@@ -23,7 +25,7 @@
 #include "gstyle-palette.h"
 
 static GstylePalette *
-load_palette (gchar *name)
+load_palette (const gchar *name)
 {
   GstylePalette *palette;
   g_autoptr (GFile) file = NULL;
@@ -57,7 +59,7 @@ test_palette (void)
   GstylePalette *palette;
 
   printf ("\n");
-  palette = load_palette ("palette.gstyle.xml");
+  palette = load_palette ("palette.xml");
   g_object_unref (palette);
 
   palette = load_palette ("palette.gpl");

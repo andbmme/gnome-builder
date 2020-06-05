@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <interface>
+  <requires lib="gtk+" version="3.24"/>
 {{if language == "c++"}}
   <object class="GtkHeaderBar" id="headerbar">
     <property name="can_focus">False</property>
@@ -15,12 +16,20 @@
     </attributes>
   </object>
 {{else}}
+  {{if language == "rust"}}
+  <object class="GtkApplicationWindow" id="window">
+  {{else}}
   <template class="{{PreFix}}Window" parent="GtkApplicationWindow">
+  {{end}}
     <property name="default-width">600</property>
     <property name="default-height">300</property>
     <child type="titlebar">
-      <object class="GtkHeaderBar" id="header_bar">
-        <property name="visible">True</property>
+    {{if language == "javascript"}}
+  <object class="GtkHeaderBar" id="headerBar">
+    {{else}}
+  <object class="GtkHeaderBar" id="header_bar">
+    {{end}}
+    <property name="visible">True</property>
         <property name="show-close-button">True</property>
         <property name="title">Hello, World!</property>
       </object>
@@ -35,6 +44,10 @@
         </attributes>
       </object>
     </child>
+  {{if language == "rust"}}
+  </object>
+  {{else}}
   </template>
+  {{end}}
 {{end}}
 </interface>

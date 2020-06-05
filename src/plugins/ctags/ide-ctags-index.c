@@ -1,6 +1,6 @@
 /* ide-ctags-index.c
  *
- * Copyright © 2015 Christian Hergert <christian@hergert.me>
+ * Copyright 2015-2019 Christian Hergert <christian@hergert.me>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,17 +14,22 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "ide-ctags-index"
 
 #include <dazzle.h>
 #include <glib/gi18n.h>
-#include <ide.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "ide-ctags-index.h"
+
+/* This object is meant to be immutable after loading so that
+ * it can be used from threads safely.
+ */
 
 struct _IdeCtagsIndex
 {
@@ -48,9 +53,8 @@ enum {
 
 static void async_initable_iface_init (GAsyncInitableIface *iface);
 
-G_DEFINE_DYNAMIC_TYPE_EXTENDED (IdeCtagsIndex, ide_ctags_index, IDE_TYPE_OBJECT, 0,
-                                G_IMPLEMENT_INTERFACE (G_TYPE_ASYNC_INITABLE,
-                                                       async_initable_iface_init))
+G_DEFINE_TYPE_WITH_CODE (IdeCtagsIndex, ide_ctags_index, IDE_TYPE_OBJECT,
+                         G_IMPLEMENT_INTERFACE (G_TYPE_ASYNC_INITABLE, async_initable_iface_init))
 
 DZL_DEFINE_COUNTER (instances, "IdeCtagsIndex", "Instances", "Number of IdeCtagsIndex instances.")
 DZL_DEFINE_COUNTER (index_entries, "IdeCtagsIndex", "N Entries", "Number of entries in indexes.")
@@ -185,7 +189,7 @@ ide_ctags_index_parse_line (gchar              *line,
 }
 
 static void
-ide_ctags_index_build_index (GTask        *task,
+ide_ctags_index_build_index (IdeTask      *task,
                              gpointer      source_object,
                              gpointer      task_data,
                              GCancellable *cancellable)
@@ -201,7 +205,7 @@ ide_ctags_index_build_index (GTask        *task,
 
   IDE_ENTRY;
 
-  g_assert (G_IS_TASK (task));
+  g_assert (IDE_IS_TASK (task));
   g_assert (IDE_IS_CTAGS_INDEX (self));
   g_assert (G_IS_FILE (self->file));
 
@@ -246,7 +250,7 @@ ide_ctags_index_build_index (GTask        *task,
   DZL_COUNTER_ADD (index_entries, (gint64)index->len);
   DZL_COUNTER_ADD (heap_size, (gint64)length);
 
-  g_task_return_boolean (task, TRUE);
+  ide_task_return_boolean (task, TRUE);
 
   IDE_EXIT;
 
@@ -255,12 +259,12 @@ failure:
   g_clear_pointer (&index, g_array_unref);
 
   if (error != NULL)
-    g_task_return_error (task, g_steal_pointer (&error));
+    ide_task_return_error (task, g_steal_pointer (&error));
   else
-    g_task_return_new_error (task,
-                             G_IO_ERROR,
-                             G_IO_ERROR_FAILED,
-                             "Failed to parse ctags file.");
+    ide_task_return_new_error (task,
+                               G_IO_ERROR,
+                               G_IO_ERROR_FAILED,
+                               "Failed to parse ctags file.");
 
   IDE_EXIT;
 }
@@ -290,7 +294,7 @@ ide_ctags_index_set_path_root (IdeCtagsIndex *self,
 {
   g_return_if_fail (IDE_IS_CTAGS_INDEX (self));
 
-  if (!dzl_str_equal0 (self->path_root, path_root))
+  if (!ide_str_equal0 (self->path_root, path_root))
     {
       g_free (self->path_root);
       self->path_root = g_strdup (path_root);
@@ -412,11 +416,6 @@ ide_ctags_index_class_init (IdeCtagsIndexClass *klass)
 }
 
 static void
-ide_ctags_index_class_finalize (IdeCtagsIndexClass *klass)
-{
-}
-
-static void
 ide_ctags_index_init (IdeCtagsIndex *self)
 {
   DZL_COUNTER_INC (instances);
@@ -430,23 +429,23 @@ ide_ctags_index_init_async (GAsyncInitable      *initable,
                             gpointer             user_data)
 {
   IdeCtagsIndex *self = (IdeCtagsIndex *)initable;
-  g_autoptr(GTask) task = NULL;
+  g_autoptr(IdeTask) task = NULL;
 
   g_assert (IDE_IS_CTAGS_INDEX (self));
   g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
 
-  task = g_task_new (self, cancellable, callback, user_data);
+  task = ide_task_new (self, cancellable, callback, user_data);
+  ide_task_set_priority (task, G_PRIORITY_LOW + 100);
+  ide_task_set_source_tag (task, ide_ctags_index_init_async);
+  ide_task_set_kind (task, IDE_TASK_KIND_INDEXER);
 
   if (self->file == NULL)
-    {
-      g_task_return_new_error (task,
+    ide_task_return_new_error (task,
                                G_IO_ERROR,
                                G_IO_ERROR_FAILED,
                                "You must set IdeCtagsIndex:file before async initialization");
-      return;
-    }
-
-  ide_thread_pool_push_task (IDE_THREAD_POOL_INDEXER, task, ide_ctags_index_build_index);
+  else
+    ide_task_run_in_thread (task, ide_ctags_index_build_index);
 }
 
 static gboolean
@@ -454,14 +453,10 @@ ide_ctags_index_init_finish (GAsyncInitable  *initable,
                              GAsyncResult    *result,
                              GError         **error)
 {
-  IdeCtagsIndex *self = (IdeCtagsIndex *)initable;
-  GTask *task = (GTask *)result;
+  g_assert (IDE_IS_CTAGS_INDEX (initable));
+  g_assert (IDE_IS_TASK (result));
 
-  g_assert (IDE_IS_CTAGS_INDEX (self));
-  g_assert (G_IS_TASK (result));
-  g_assert (G_IS_TASK (task));
-
-  return g_task_propagate_boolean (task, error);
+  return ide_task_propagate_boolean (IDE_TASK (result), error);
 }
 
 static void
@@ -626,12 +621,6 @@ ide_ctags_index_lookup_prefix (IdeCtagsIndex *self,
                                       ide_ctags_index_entry_compare_prefix);
 }
 
-void
-_ide_ctags_index_register_type (GTypeModule *module)
-{
-  ide_ctags_index_register_type (module);
-}
-
 guint64
 ide_ctags_index_get_mtime (IdeCtagsIndex *self)
 {
@@ -656,6 +645,8 @@ ide_ctags_index_get_mtime (IdeCtagsIndex *self)
  *
  * Returns: (transfer container) (element-type Ide.CtagsIndexEntry): An array
  *   of items matching the relative path.
+ *
+ * Since: 3.32
  */
 GPtrArray *
 ide_ctags_index_find_with_path (IdeCtagsIndex *self,

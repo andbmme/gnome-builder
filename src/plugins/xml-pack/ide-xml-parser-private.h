@@ -1,6 +1,6 @@
 /* ide-xml-parser-private.h
  *
- * Copyright © 2017 Sebastien Lafargue <slafargue@gnome.org>
+ * Copyright 2017 Sebastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #pragma once
@@ -29,8 +31,8 @@
 
 G_BEGIN_DECLS
 
-typedef gboolean (*PostProcessingCallback)                       (IdeXmlParser           *self,
-                                                                  IdeXmlSymbolNode       *root_node);
+typedef gboolean (*PostProcessingCallback) (IdeXmlParser     *self,
+                                            IdeXmlSymbolNode *root_node);
 
 typedef enum _BuildState
 {
@@ -53,8 +55,6 @@ typedef enum _ColorTagId
 struct _IdeXmlParser
 {
   GObject                 parent_instance;
-  IdeXmlSax              *sax_parser;
-  IdeXmlStack            *stack;
   GSettings              *settings;
   GArray                 *color_tags;
   PostProcessingCallback  post_processing_callback;
@@ -75,6 +75,9 @@ typedef struct _ParserState
   gint               current_depth;
   GPtrArray         *schemas;
   gint64             sequence;
+
+  IdeXmlSax         *sax_parser;
+  IdeXmlStack       *stack;
 
   guint              error_missing_tag_end : 1;
   guint              file_is_ui : 1;

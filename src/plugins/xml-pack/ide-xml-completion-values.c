@@ -1,6 +1,6 @@
 /* ide-xml-completion-values.c
  *
- * Copyright © 2017 Sebastien Lafargue <slafargue@gnome.org>
+ * Copyright 2017 Sebastien Lafargue <slafargue@gnome.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,19 +14,22 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
+
+#include <dazzle.h>
 
 #include "ide-xml-completion-values.h"
 #include "ide-xml-position.h"
 
-typedef struct _MatchingState
+typedef struct
 {
-  IdeXmlRngDefine  *define;
-  GPtrArray        *match_values;
-  const gchar      *values;
-  const gchar      *prefix;
+  IdeXmlRngDefine *define;
+  gchar           *values;
+  gchar           *prefix;
 
-  guint             is_initial_state : 1;
+  guint            is_initial_state : 1;
 } MatchingState;
 
 static GPtrArray * process_matching_state (MatchingState   *state,
@@ -95,8 +98,8 @@ matching_state_new (IdeXmlRngDefine  *define,
   state = g_slice_new0 (MatchingState);
 
   state->define = define;
-  state->values = (values != NULL) ? g_strdup (values) : NULL;
-  state->prefix = (prefix != NULL) ? g_strdup (prefix) : NULL;
+  state->values = g_strdup (values);
+  state->prefix = g_strdup (prefix);
 
   state->is_initial_state = FALSE;
 
@@ -108,6 +111,7 @@ matching_state_free (MatchingState *state)
 {
   g_clear_pointer (&state->values, g_free);
   g_clear_pointer (&state->prefix, g_free);
+  g_slice_free (MatchingState, state);
 }
 
 static GPtrArray *
@@ -197,7 +201,7 @@ process_matching_state (MatchingState   *state,
 {
   IdeXmlRngDefine *old_define;
   IdeXmlRngDefineType type;
-  GPtrArray *match_values;
+  GPtrArray *match_values = NULL;
 
   g_assert (state != NULL);
   g_assert (define != NULL);

@@ -1,6 +1,6 @@
 /* gbp-todo-panel.h
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,11 +14,13 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #pragma once
 
-#include <ide.h>
+#include <dazzle.h>
 
 #include "gbp-todo-model.h"
 
@@ -26,10 +28,11 @@ G_BEGIN_DECLS
 
 #define GBP_TYPE_TODO_PANEL (gbp_todo_panel_get_type())
 
-G_DECLARE_FINAL_TYPE (GbpTodoPanel, gbp_todo_panel, GBP, TODO_PANEL, GtkBin)
+G_DECLARE_FINAL_TYPE (GbpTodoPanel, gbp_todo_panel, GBP, TODO_PANEL, DzlDockWidget)
 
-GbpTodoModel *gbp_todo_panel_get_model (GbpTodoPanel *self);
-void          gbp_todo_panel_set_model (GbpTodoPanel *self,
-                                        GbpTodoModel *model);
+GbpTodoModel *gbp_todo_panel_get_model  (GbpTodoPanel *self);
+void          gbp_todo_panel_set_model  (GbpTodoPanel *self,
+                                         GbpTodoModel *model);
+void          gbp_todo_panel_make_ready (GbpTodoPanel *self);
 
 G_END_DECLS

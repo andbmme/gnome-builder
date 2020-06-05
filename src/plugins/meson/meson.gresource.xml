@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <gresources>
-  <gresource prefix="/org/gnome/builder/plugins">
+  <gresource prefix="/plugins/meson">
     <file>meson.plugin</file>
+    <file>gbp-meson-toolchain-edition-preferences-row.ui</file>
+    <file>gbp-meson-tool-row.ui</file>
   </gresource>
 </gresources>

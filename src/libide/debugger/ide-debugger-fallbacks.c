@@ -1,6 +1,6 @@
 /* ide-debugger-fallbacks.c
  *
- * Copyright © 2017 Christian Hergert <chergert@redhat.com>
+ * Copyright 2017-2019 Christian Hergert <chergert@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,12 +14,16 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #define G_LOG_DOMAIN "ide-debugger-fallbacks"
 
-#include "debugger/ide-debugger.h"
-#include "debugger/ide-debugger-private.h"
+#include "config.h"
+
+#include "ide-debugger.h"
+#include "ide-debugger-private.h"
 
 void
 _ide_debugger_real_list_frames_async (IdeDebugger         *self,
@@ -140,7 +144,8 @@ _ide_debugger_real_modify_breakpoint_finish (IdeDebugger   *self,
 
 void
 _ide_debugger_real_list_locals_async (IdeDebugger         *self,
-                                      IdeDebuggerThread   *thread, IdeDebuggerFrame    *frame,
+                                      IdeDebuggerThread   *thread,
+                                      IdeDebuggerFrame    *frame,
                                       GCancellable        *cancellable,
                                       GAsyncReadyCallback  callback,
                                       gpointer             user_data)
